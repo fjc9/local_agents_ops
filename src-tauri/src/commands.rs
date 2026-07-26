@@ -3,7 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 
 use crate::engines::ollama::OllamaBackend;
-use crate::engines::{ChatMessage, ChatStreamEvent, InferenceBackend, ModelInfo};
+use crate::engines::{ChatMessage, ChatOptions, ChatStreamEvent, InferenceBackend, ModelInfo};
 
 pub struct AppState {
     pub ollama: Arc<OllamaBackend>,
@@ -29,9 +29,13 @@ pub async fn send_chat(
     request_id: String,
     model: String,
     messages: Vec<ChatMessage>,
+    think: Option<bool>,
 ) -> Result<(), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
     let backend = state.ollama.clone();
+    let options = ChatOptions {
+        think: think.unwrap_or(false),
+    };
 
     let forward_app = app.clone();
     tokio::spawn(async move {
@@ -41,7 +45,7 @@ pub async fn send_chat(
     });
 
     backend
-        .chat_stream(request_id, &model, &messages, tx)
+        .chat_stream(request_id, &model, &messages, options, tx)
         .await
         .map_err(|e| e.to_string())
 }

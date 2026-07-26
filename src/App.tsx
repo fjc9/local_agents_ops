@@ -5,14 +5,16 @@ import type { ChatMessage, ChatStreamEvent, ModelInfo } from "./types";
 import "./App.css";
 
 type OllamaStatus = "checking" | "connected" | "unreachable";
+type DisplayMessage = ChatMessage & { thinking?: string };
 
 function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>("");
   const [status, setStatus] = useState<OllamaStatus>("checking");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [thinkMode, setThinkMode] = useState(false);
 
   const activeRequestId = useRef<string | null>(null);
 
@@ -31,7 +33,19 @@ function App() {
       const payload = event.payload;
       if (payload.request_id !== activeRequestId.current) return;
 
-      if (payload.type === "token") {
+      if (payload.type === "thinking") {
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last && last.role === "assistant") {
+            next[next.length - 1] = {
+              ...last,
+              thinking: (last.thinking ?? "") + payload.content,
+            };
+          }
+          return next;
+        });
+      } else if (payload.type === "token") {
         setMessages((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
@@ -44,6 +58,17 @@ function App() {
           return next;
         });
       } else if (payload.type === "done") {
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last && last.role === "assistant" && !last.content && last.thinking) {
+            next[next.length - 1] = {
+              ...last,
+              content: "（思考の途中で応答が終了しました。もう一度お試しください）",
+            };
+          }
+          return next;
+        });
         setIsStreaming(false);
         activeRequestId.current = null;
       } else if (payload.type === "error") {
@@ -68,7 +93,12 @@ function App() {
     const requestId = crypto.randomUUID();
     activeRequestId.current = requestId;
 
-    const outgoing: ChatMessage[] = [...messages, { role: "user", content: text }];
+    // Only role/content go back to the model — thinking traces are for
+    // display only and shouldn't bloat the conversation history we resend.
+    const outgoing: ChatMessage[] = [
+      ...messages.map(({ role, content }) => ({ role, content })),
+      { role: "user", content: text },
+    ];
     setMessages([...outgoing, { role: "assistant", content: "" }]);
     setInput("");
     setIsStreaming(true);
@@ -78,6 +108,7 @@ function App() {
         requestId,
         model: selectedModel,
         messages: outgoing,
+        think: thinkMode,
       });
     } catch (err) {
       setMessages((prev) => [
@@ -99,18 +130,38 @@ function App() {
           </span>
         )}
         {status === "connected" && (
-          <select
-            value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
-            disabled={isStreaming}
-          >
-            {models.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name}
-                {m.parameter_size ? ` (${m.parameter_size})` : ""}
-              </option>
-            ))}
-          </select>
+          <>
+            <div className="think-toggle" role="group" aria-label="思考モード">
+              <button
+                className={!thinkMode ? "active" : ""}
+                onClick={() => setThinkMode(false)}
+                disabled={isStreaming}
+                title="thinkingを使わず即座に回答"
+              >
+                ⚡ 高速
+              </button>
+              <button
+                className={thinkMode ? "active" : ""}
+                onClick={() => setThinkMode(true)}
+                disabled={isStreaming}
+                title="thinkingを使ってじっくり推論してから回答"
+              >
+                🧠 じっくり
+              </button>
+            </div>
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              disabled={isStreaming}
+            >
+              {models.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name}
+                  {m.parameter_size ? ` (${m.parameter_size})` : ""}
+                </option>
+              ))}
+            </select>
+          </>
         )}
       </header>
 
@@ -118,14 +169,24 @@ function App() {
         {messages.length === 0 && (
           <div className="empty-state">モデルを選んでメッセージを送信してください</div>
         )}
-        {messages.map((m, i) => (
-          <div key={i} className={`message message-${m.role}`}>
-            <div className="message-role">{m.role}</div>
-            <div className="message-content">
-              {m.content || (isStreaming && i === messages.length - 1 ? "…" : "")}
+        {messages.map((m, i) => {
+          const isLast = i === messages.length - 1;
+          const stillThinking = isStreaming && isLast && !m.content;
+          return (
+            <div key={i} className={`message message-${m.role}`}>
+              <div className="message-role">{m.role}</div>
+              {m.thinking && (
+                <details className="message-thinking" open={stillThinking}>
+                  <summary>{stillThinking ? "思考中…" : "思考の過程"}</summary>
+                  <div className="message-thinking-content">{m.thinking}</div>
+                </details>
+              )}
+              <div className="message-content">
+                {m.content || (stillThinking && !m.thinking ? "…" : "")}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </main>
 
       <footer className="composer">

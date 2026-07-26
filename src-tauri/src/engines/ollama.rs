@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{ChatMessage, ChatStreamEvent, EngineError, InferenceBackend, ModelInfo};
+use super::{ChatMessage, ChatOptions, ChatStreamEvent, EngineError, InferenceBackend, ModelInfo};
 
 pub struct OllamaBackend {
     base_url: String,
@@ -70,6 +70,7 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
+    think: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +87,10 @@ struct ChatStreamLine {
 struct ChatStreamMessage {
     #[serde(default)]
     content: String,
+    /// Reasoning trace for "thinking" models (e.g. Qwen3.x). Empty/absent
+    /// when `think` wasn't requested or the model doesn't support it.
+    #[serde(default)]
+    thinking: String,
 }
 
 #[async_trait]
@@ -125,6 +130,7 @@ impl InferenceBackend for OllamaBackend {
         request_id: String,
         model: &str,
         messages: &[ChatMessage],
+        options: ChatOptions,
         sender: UnboundedSender<ChatStreamEvent>,
     ) -> Result<(), EngineError> {
         let url = format!("{}/api/chat", self.base_url);
@@ -132,6 +138,7 @@ impl InferenceBackend for OllamaBackend {
             model,
             messages,
             stream: true,
+            think: options.think,
         };
 
         let resp = self
@@ -184,6 +191,12 @@ impl InferenceBackend for OllamaBackend {
                 }
 
                 if let Some(msg) = parsed.message {
+                    if !msg.thinking.is_empty() {
+                        let _ = sender.send(ChatStreamEvent::Thinking {
+                            request_id: request_id.clone(),
+                            content: msg.thinking,
+                        });
+                    }
                     if !msg.content.is_empty() {
                         let _ = sender.send(ChatStreamEvent::Token {
                             request_id: request_id.clone(),

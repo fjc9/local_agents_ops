@@ -13,6 +13,7 @@ export interface ModelInfo {
 }
 
 export type ChatStreamEvent =
+  | { type: "thinking"; request_id: string; content: string }
   | { type: "token"; request_id: string; content: string }
   | { type: "done"; request_id: string }
   | { type: "error"; request_id: string; message: string };

@@ -32,6 +32,13 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatStreamEvent {
+    /// Reasoning-model "thinking" trace, delivered separately from the
+    /// final answer so the UI can show it as a distinct (collapsible)
+    /// section instead of leaving the user staring at a blank bubble.
+    Thinking {
+        request_id: String,
+        content: String,
+    },
     Token {
         request_id: String,
         content: String,
@@ -43,6 +50,19 @@ pub enum ChatStreamEvent {
         request_id: String,
         message: String,
     },
+}
+
+/// Per-request knobs that apply across backends. Kept as a struct (rather
+/// than growing the `chat_stream` signature) so new options don't require
+/// touching every implementor.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ChatOptions {
+    /// Ask reasoning-capable models to emit a thinking trace before the
+    /// final answer. Off by default: for a "thinking" model this can mean
+    /// thousands of extra tokens (tens of seconds) before anything is
+    /// visible, so callers opt in when they want the deeper reasoning.
+    #[serde(default)]
+    pub think: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +94,7 @@ pub trait InferenceBackend: Send + Sync {
         request_id: String,
         model: &str,
         messages: &[ChatMessage],
+        options: ChatOptions,
         sender: UnboundedSender<ChatStreamEvent>,
     ) -> Result<(), EngineError>;
 }
