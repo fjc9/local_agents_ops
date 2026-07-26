@@ -1,83 +1,95 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ChatMessage, ChatStreamEvent, ModelInfo } from "./types";
 import "./App.css";
 
 type OllamaStatus = "checking" | "connected" | "unreachable";
-type DisplayMessage = ChatMessage & { thinking?: string };
+type ReplyStatus = "streaming" | "done" | "error";
+
+interface ModelReply {
+  model: string;
+  requestId: string;
+  content: string;
+  thinking?: string;
+  status: ReplyStatus;
+}
+
+interface Turn {
+  id: string;
+  userText: string;
+  replies: ModelReply[];
+}
+
+/** Each model gets its own conversation thread: its own past answers only,
+ * not what the other models in a parallel-comparison turn said. */
+function buildHistoryForModel(turns: Turn[], model: string): ChatMessage[] {
+  const history: ChatMessage[] = [];
+  for (const turn of turns) {
+    const reply = turn.replies.find((r) => r.model === model);
+    if (!reply) continue;
+    history.push({ role: "user", content: turn.userText });
+    history.push({ role: "assistant", content: reply.content });
+  }
+  return history;
+}
 
 function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [status, setStatus] = useState<OllamaStatus>("checking");
-  const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
   const [thinkMode, setThinkMode] = useState(false);
 
-  const activeRequestId = useRef<string | null>(null);
+  const isStreaming =
+    turns.length > 0 && turns[turns.length - 1].replies.some((r) => r.status === "streaming");
 
   useEffect(() => {
     invoke<ModelInfo[]>("list_ollama_models")
       .then((list) => {
         setModels(list);
         setStatus("connected");
-        if (list.length > 0) setSelectedModel(list[0].name);
+        setSelectedModels(list.map((m) => m.name));
       })
       .catch(() => setStatus("unreachable"));
   }, []);
 
   useEffect(() => {
+    function updateReply(requestId: string, updater: (r: ModelReply) => ModelReply) {
+      setTurns((prev) =>
+        prev.map((turn) => {
+          if (!turn.replies.some((r) => r.requestId === requestId)) return turn;
+          return {
+            ...turn,
+            replies: turn.replies.map((r) => (r.requestId === requestId ? updater(r) : r)),
+          };
+        }),
+      );
+    }
+
     const unlisten = listen<ChatStreamEvent>("chat-stream", (event) => {
       const payload = event.payload;
-      if (payload.request_id !== activeRequestId.current) return;
 
       if (payload.type === "thinking") {
-        setMessages((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          if (last && last.role === "assistant") {
-            next[next.length - 1] = {
-              ...last,
-              thinking: (last.thinking ?? "") + payload.content,
-            };
-          }
-          return next;
-        });
+        updateReply(payload.request_id, (r) => ({
+          ...r,
+          thinking: (r.thinking ?? "") + payload.content,
+        }));
       } else if (payload.type === "token") {
-        setMessages((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          if (last && last.role === "assistant") {
-            next[next.length - 1] = {
-              ...last,
-              content: last.content + payload.content,
-            };
-          }
-          return next;
-        });
+        updateReply(payload.request_id, (r) => ({ ...r, content: r.content + payload.content }));
       } else if (payload.type === "done") {
-        setMessages((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          if (last && last.role === "assistant" && !last.content && last.thinking) {
-            next[next.length - 1] = {
-              ...last,
-              content: "（思考の途中で応答が終了しました。もう一度お試しください）",
-            };
-          }
-          return next;
-        });
-        setIsStreaming(false);
-        activeRequestId.current = null;
+        updateReply(payload.request_id, (r) =>
+          !r.content && r.thinking
+            ? { ...r, status: "done", content: "（思考の途中で応答が終了しました。もう一度お試しください）" }
+            : { ...r, status: "done" },
+        );
       } else if (payload.type === "error") {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: `[error: ${payload.message}]` },
-        ]);
-        setIsStreaming(false);
-        activeRequestId.current = null;
+        updateReply(payload.request_id, (r) => ({
+          ...r,
+          status: "error",
+          content: `[error: ${payload.message}]`,
+        }));
       }
     });
 
@@ -86,36 +98,49 @@ function App() {
     };
   }, []);
 
+  function toggleModel(name: string) {
+    setSelectedModels((prev) =>
+      prev.includes(name) ? prev.filter((m) => m !== name) : [...prev, name],
+    );
+  }
+
   async function handleSend() {
     const text = input.trim();
-    if (!text || !selectedModel || isStreaming) return;
+    if (!text || selectedModels.length === 0 || isStreaming) return;
 
-    const requestId = crypto.randomUUID();
-    activeRequestId.current = requestId;
+    const priorTurns = turns;
+    const replies: ModelReply[] = selectedModels.map((model) => ({
+      model,
+      requestId: crypto.randomUUID(),
+      content: "",
+      status: "streaming",
+    }));
 
-    // Only role/content go back to the model — thinking traces are for
-    // display only and shouldn't bloat the conversation history we resend.
-    const outgoing: ChatMessage[] = [
-      ...messages.map(({ role, content }) => ({ role, content })),
-      { role: "user", content: text },
-    ];
-    setMessages([...outgoing, { role: "assistant", content: "" }]);
+    setTurns((prev) => [...prev, { id: crypto.randomUUID(), userText: text, replies }]);
     setInput("");
-    setIsStreaming(true);
 
-    try {
-      await invoke("send_chat", {
-        requestId,
-        model: selectedModel,
+    for (const reply of replies) {
+      const outgoing: ChatMessage[] = [
+        ...buildHistoryForModel(priorTurns, reply.model),
+        { role: "user", content: text },
+      ];
+      invoke("send_chat", {
+        requestId: reply.requestId,
+        model: reply.model,
         messages: outgoing,
         think: thinkMode,
+      }).catch((err) => {
+        setTurns((prev) =>
+          prev.map((turn) => ({
+            ...turn,
+            replies: turn.replies.map((r) =>
+              r.requestId === reply.requestId
+                ? { ...r, status: "error" as const, content: `[error: ${String(err)}]` }
+                : r,
+            ),
+          })),
+        );
       });
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `[error: ${String(err)}]` },
-      ]);
-      setIsStreaming(false);
     }
   }
 
@@ -149,44 +174,60 @@ function App() {
                 🧠 じっくり
               </button>
             </div>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              disabled={isStreaming}
-            >
+            <div className="model-select" role="group" aria-label="比較するモデル">
               {models.map((m) => (
-                <option key={m.name} value={m.name}>
+                <button
+                  key={m.name}
+                  className={selectedModels.includes(m.name) ? "active" : ""}
+                  onClick={() => toggleModel(m.name)}
+                  disabled={isStreaming}
+                  title={m.parameter_size ?? ""}
+                >
                   {m.name}
-                  {m.parameter_size ? ` (${m.parameter_size})` : ""}
-                </option>
+                </button>
               ))}
-            </select>
+            </div>
           </>
         )}
       </header>
 
-      <main className="messages">
-        {messages.length === 0 && (
-          <div className="empty-state">モデルを選んでメッセージを送信してください</div>
+      <main className="turns">
+        {turns.length === 0 && (
+          <div className="empty-state">
+            比較したいモデルを選んでメッセージを送信してください（複数選択で並列比較）
+          </div>
         )}
-        {messages.map((m, i) => {
-          const isLast = i === messages.length - 1;
-          const stillThinking = isStreaming && isLast && !m.content;
-          return (
-            <div key={i} className={`message message-${m.role}`}>
-              <div className="message-role">{m.role}</div>
-              {m.thinking && (
-                <details className="message-thinking" open={stillThinking}>
-                  <summary>{stillThinking ? "思考中…" : "思考の過程"}</summary>
-                  <div className="message-thinking-content">{m.thinking}</div>
-                </details>
-              )}
-              <div className="message-content">
-                {m.content || (stillThinking && !m.thinking ? "…" : "")}
-              </div>
+        {turns.map((turn) => (
+          <div key={turn.id} className="turn">
+            <div className="message message-user">
+              <div className="message-role">USER</div>
+              <div className="message-content">{turn.userText}</div>
             </div>
-          );
-        })}
+            <div className="reply-row">
+              {turn.replies.map((r) => {
+                const stillThinking = r.status === "streaming" && !r.content && !!r.thinking;
+                const waiting = r.status === "streaming" && !r.content && !r.thinking;
+                return (
+                  <div key={r.requestId} className={`reply-panel reply-${r.status}`}>
+                    <div className="reply-header">
+                      <span className="reply-model">{r.model}</span>
+                      <span className={`reply-status reply-status-${r.status}`}>
+                        {r.status === "streaming" ? (stillThinking ? "思考中…" : "生成中…") : r.status}
+                      </span>
+                    </div>
+                    {r.thinking && (
+                      <details className="message-thinking" open={stillThinking}>
+                        <summary>{stillThinking ? "思考中…" : "思考の過程"}</summary>
+                        <div className="message-thinking-content">{r.thinking}</div>
+                      </details>
+                    )}
+                    <div className="message-content">{r.content || (waiting ? "…" : "")}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </main>
 
       <footer className="composer">
@@ -204,9 +245,9 @@ function App() {
         />
         <button
           onClick={handleSend}
-          disabled={status !== "connected" || isStreaming || !input.trim()}
+          disabled={status !== "connected" || isStreaming || !input.trim() || selectedModels.length === 0}
         >
-          {isStreaming ? "生成中…" : "送信"}
+          {isStreaming ? "生成中…" : `送信 (${selectedModels.length})`}
         </button>
       </footer>
     </div>
