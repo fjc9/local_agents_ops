@@ -66,6 +66,58 @@ impl OllamaBackend {
         Ok(())
     }
 
+    /// Single-shot (non-streaming) chat call that returns the complete
+    /// response text. Used for internal decision-making calls (e.g. the
+    /// router/compression step) where the caller needs to parse the whole
+    /// answer at once rather than render it token by token. `force_json`
+    /// asks Ollama to constrain output to valid JSON.
+    pub async fn chat_once(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        force_json: bool,
+    ) -> Result<String, EngineError> {
+        let url = format!("{}/api/chat", self.base_url);
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "stream": false,
+            // This call is for fast internal decisions, not user-facing answers --
+            // a thinking-capable model left to its default would rather spend
+            // tens of seconds deliberating than emit the short JSON we asked for.
+            "think": false,
+        });
+        if force_json {
+            body["format"] = serde_json::Value::String("json".to_string());
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::Unreachable(url.clone(), e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::Response(format!("{status}: {text}")));
+        }
+
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| EngineError::Parse(e.to_string()))?;
+
+        value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| EngineError::Parse("no message.content in response".to_string()))
+    }
+
     /// Pulls a model, forwarding Ollama's own download-progress lines
     /// (manifest -> per-layer digest download -> verify -> success) as
     /// they arrive rather than waiting for the whole multi-GB transfer.

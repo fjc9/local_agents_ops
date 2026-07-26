@@ -1,14 +1,17 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { ProviderInfo } from "./types";
+import type { ModelInfo, ProviderInfo } from "./types";
 
 interface Props {
   providers: ProviderInfo[];
+  models: ModelInfo[];
+  parentModel: string;
+  onParentModelChange: (model: string) => void;
   onClose: () => void;
   onChanged: () => void;
 }
 
-function Settings({ providers, onClose, onChanged }: Props) {
+function Settings({ providers, models, parentModel, onParentModelChange, onClose, onChanged }: Props) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +51,26 @@ function Settings({ providers, onClose, onChanged }: Props) {
         <div className="settings-header">
           <span>APIキー設定</span>
           <button onClick={onClose}>✕</button>
+        </div>
+        <div className="settings-row">
+          <div className="settings-row-header">
+            <span className="settings-label">親モデル（オンライン送信の最適化に使用）</span>
+          </div>
+          <p className="settings-note" style={{ margin: "0 0 8px" }}>
+            オンライン送信前に、このモデルが必要なサービスだけを選び、内容を圧縮してから送ります。
+          </p>
+          <select
+            value={parentModel}
+            onChange={(e) => onParentModelChange(e.target.value)}
+            disabled={models.length === 0}
+          >
+            <option value="">(なし — 最適化せず直接送信)</option>
+            {models.map((m) => (
+              <option key={m.name} value={m.name}>
+                {m.name}
+              </option>
+            ))}
+          </select>
         </div>
         <p className="settings-note">
           各サービス自身のAPIキーを入力してください。キーはこのMac上のKeychainに保存され、外部には送信されません。

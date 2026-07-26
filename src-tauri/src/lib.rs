@@ -2,6 +2,7 @@ mod catalog;
 mod commands;
 mod credentials;
 mod engines;
+mod router;
 
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ pub fn run() {
             commands::detect_hardware,
             commands::recommend_models,
             commands::pull_model,
+            commands::route_and_compress,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

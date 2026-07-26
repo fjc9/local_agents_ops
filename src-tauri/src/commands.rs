@@ -9,6 +9,7 @@ use crate::engines::gemini::GeminiBackend;
 use crate::engines::ollama::OllamaBackend;
 use crate::engines::openai_compat::OpenAiCompatBackend;
 use crate::engines::{ChatMessage, ChatOptions, ChatStreamEvent, InferenceBackend, ModelInfo};
+use crate::router::{self, RouterDecision};
 
 pub struct AppState {
     pub ollama: Arc<OllamaBackend>,
@@ -165,4 +166,28 @@ pub async fn pull_model(app: AppHandle, state: State<'_, AppState>, model: Strin
 
     state.ollama.clone().pull_model(model, tx).await;
     Ok(())
+}
+
+/// Asks the parent local model which online providers are worth calling
+/// for this turn, and for a compressed version of the context to send
+/// them. Errors (including a parent model that didn't return valid JSON)
+/// are surfaced as-is -- the frontend decides whether to fall back to an
+/// uncompressed direct send rather than silently guessing here.
+#[tauri::command]
+pub async fn route_and_compress(
+    state: State<'_, AppState>,
+    parent_model: String,
+    candidate_providers: Vec<String>,
+    history: Vec<ChatMessage>,
+    new_message: String,
+) -> Result<RouterDecision, String> {
+    router::route_and_compress(
+        &state.ollama,
+        &parent_model,
+        &candidate_providers,
+        &history,
+        &new_message,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }

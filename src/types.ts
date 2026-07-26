@@ -50,3 +50,8 @@ export type PullProgressEvent =
   | { type: "progress"; model: string; status: string; completed: number | null; total: number | null }
   | { type: "done"; model: string }
   | { type: "error"; model: string; message: string };
+
+export interface RouterDecision {
+  providers: string[];
+  compressed_prompt: string;
+}

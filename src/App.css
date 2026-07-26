@@ -87,6 +87,16 @@ body,
   border-color: rgba(214, 69, 69, 0.5);
 }
 
+.reply-panel.reply-skipped {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+.routing-hint {
+  color: #396cd8;
+  opacity: 1;
+}
+
 .reply-header {
   display: flex;
   justify-content: space-between;
