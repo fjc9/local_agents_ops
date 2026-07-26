@@ -117,16 +117,32 @@ body,
   gap: 4px;
 }
 
-.model-select button {
+.model-chip {
+  display: flex;
+  gap: 2px;
+}
+
+.model-chip > button:first-child {
   padding: 0.4em 0.7em;
   font-size: 0.8em;
   opacity: 0.6;
 }
 
-.model-select button.active {
+.model-chip > button:first-child.active {
   opacity: 1;
   border-color: #396cd8;
   background-color: rgba(57, 108, 216, 0.15);
+}
+
+.unload-button {
+  padding: 0.4em 0.5em;
+  font-size: 0.75em;
+  opacity: 0.4;
+}
+
+.unload-button:not(:disabled):hover {
+  opacity: 1;
+  border-color: #d64545;
 }
 
 .empty-state {

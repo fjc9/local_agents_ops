@@ -44,6 +44,28 @@ impl OllamaBackend {
         Ok(body.version)
     }
 
+    /// Forces Ollama to drop a model from memory immediately, rather than
+    /// waiting out its normal keep_alive idle timeout. `keep_alive: 0` on a
+    /// prompt-less generate request is Ollama's documented unload signal;
+    /// the actual memory free happens a moment after this call returns.
+    pub async fn unload_model(&self, model: &str) -> Result<(), EngineError> {
+        let url = format!("{}/api/generate", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({ "model": model, "keep_alive": 0 }))
+            .send()
+            .await
+            .map_err(|e| EngineError::Unreachable(url.clone(), e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::Response(format!("{status}: {text}")));
+        }
+        Ok(())
+    }
+
     /// Pulls a model, forwarding Ollama's own download-progress lines
     /// (manifest -> per-layer digest download -> verify -> success) as
     /// they arrive rather than waiting for the whole multi-GB transfer.

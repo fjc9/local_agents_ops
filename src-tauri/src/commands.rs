@@ -65,6 +65,11 @@ pub async fn ollama_version(state: State<'_, AppState>) -> Result<String, String
     state.ollama.version().await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn unload_model(state: State<'_, AppState>, model: String) -> Result<(), String> {
+    state.ollama.unload_model(&model).await.map_err(|e| e.to_string())
+}
+
 /// Streams a chat completion. Tokens are pushed to the frontend as
 /// `chat-stream` events as they arrive; the returned Result only signals
 /// whether the request was sent successfully, not the content itself.

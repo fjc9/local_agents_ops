@@ -18,6 +18,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_ollama_models,
             commands::ollama_version,
+            commands::unload_model,
             commands::send_chat,
             commands::list_providers,
             commands::save_api_key,

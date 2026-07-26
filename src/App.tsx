@@ -47,6 +47,7 @@ function App() {
   const [onlineMode, setOnlineMode] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const [unloadingModels, setUnloadingModels] = useState<Set<string>>(new Set());
   const isComposingRef = useRef(false);
 
   const isStreaming =
@@ -159,6 +160,21 @@ function App() {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]));
   }
 
+  async function handleUnload(model: string) {
+    setUnloadingModels((prev) => new Set(prev).add(model));
+    try {
+      await invoke("unload_model", { model });
+    } catch (err) {
+      console.error(`failed to unload ${model}:`, err);
+    } finally {
+      setUnloadingModels((prev) => {
+        const next = new Set(prev);
+        next.delete(model);
+        return next;
+      });
+    }
+  }
+
   async function handleSend() {
     const text = input.trim();
     const targets = selectedIds.map((id) => targetsById.get(id)).filter((t): t is ModelTarget => !!t);
@@ -243,15 +259,26 @@ function App() {
             </div>
             <div className="model-select" role="group" aria-label="比較するモデル">
               {availableTargets.map((t) => (
-                <button
-                  key={t.id}
-                  className={selectedIds.includes(t.id) ? "active" : ""}
-                  onClick={() => toggleTarget(t.id)}
-                  disabled={isStreaming}
-                  title={t.provider}
-                >
-                  {t.label}
-                </button>
+                <div key={t.id} className="model-chip">
+                  <button
+                    className={selectedIds.includes(t.id) ? "active" : ""}
+                    onClick={() => toggleTarget(t.id)}
+                    disabled={isStreaming}
+                    title={t.provider}
+                  >
+                    {t.label}
+                  </button>
+                  {t.provider === "ollama" && (
+                    <button
+                      className="unload-button"
+                      onClick={() => handleUnload(t.model)}
+                      disabled={isStreaming || unloadingModels.has(t.model)}
+                      title="メモリから解放 (unload)"
+                    >
+                      {unloadingModels.has(t.model) ? "…" : "⏏"}
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
             <button className="settings-button" onClick={() => setCatalogOpen(true)} title="モデルカタログ">
