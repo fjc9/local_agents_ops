@@ -17,3 +17,17 @@ export type ChatStreamEvent =
   | { type: "token"; request_id: string; content: string }
   | { type: "done"; request_id: string }
   | { type: "error"; request_id: string; message: string };
+
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  default_model: string;
+  configured: boolean;
+}
+
+export interface ModelTarget {
+  id: string;
+  provider: string;
+  model: string;
+  label: string;
+}

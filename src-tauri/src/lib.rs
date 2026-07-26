@@ -1,4 +1,5 @@
 mod commands;
+mod credentials;
 mod engines;
 
 use std::sync::Arc;
@@ -17,6 +18,9 @@ pub fn run() {
             commands::list_ollama_models,
             commands::ollama_version,
             commands::send_chat,
+            commands::list_providers,
+            commands::save_api_key,
+            commands::clear_api_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

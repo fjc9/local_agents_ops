@@ -206,6 +206,113 @@ body,
   color: #fff;
 }
 
+.settings-button {
+  padding: 0.4em 0.6em;
+  font-size: 0.95em;
+}
+
+.online-hint {
+  padding: 6px 16px;
+  font-size: 0.8em;
+  opacity: 0.65;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.settings-panel {
+  width: min(480px, 90vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  background-color: #f6f6f6;
+  color: #0f0f0f;
+  border-radius: 12px;
+  padding: 16px 20px 20px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.settings-header button {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  font-size: 1em;
+  padding: 0.2em 0.5em;
+}
+
+.settings-note {
+  font-size: 0.82em;
+  opacity: 0.7;
+  margin: 0 0 14px;
+}
+
+.settings-error {
+  font-size: 0.82em;
+  color: #d64545;
+}
+
+.settings-row {
+  padding: 10px 0;
+  border-top: 1px solid rgba(127, 127, 127, 0.2);
+}
+
+.settings-row-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.settings-label {
+  font-weight: 600;
+}
+
+.settings-status {
+  font-size: 0.78em;
+  opacity: 0.55;
+}
+
+.settings-status.ok {
+  color: #2f9e44;
+  opacity: 1;
+}
+
+.settings-row-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.settings-row-controls input {
+  flex: 1;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  padding: 0.5em 0.7em;
+  font-family: inherit;
+  font-size: 0.9em;
+  background-color: #ffffff;
+  color: inherit;
+  outline: none;
+}
+
+.settings-row-controls button {
+  padding: 0.5em 0.9em;
+  font-size: 0.82em;
+}
+
 .composer {
   flex-shrink: 0;
   display: flex;
@@ -269,6 +376,16 @@ button,
   .composer textarea,
   select,
   button {
+    color: #ffffff;
+    background-color: #0f0f0f98;
+  }
+
+  .settings-panel {
+    background-color: #2f2f2f;
+    color: #f6f6f6;
+  }
+
+  .settings-row-controls input {
     color: #ffffff;
     background-color: #0f0f0f98;
   }

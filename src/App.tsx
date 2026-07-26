@@ -1,14 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ChatStreamEvent, ModelInfo } from "./types";
+import type { ChatMessage, ChatStreamEvent, ModelInfo, ModelTarget, ProviderInfo } from "./types";
+import Settings from "./Settings";
 import "./App.css";
 
 type OllamaStatus = "checking" | "connected" | "unreachable";
 type ReplyStatus = "streaming" | "done" | "error";
 
 interface ModelReply {
-  model: string;
+  target: ModelTarget;
   requestId: string;
   content: string;
   thinking?: string;
@@ -23,10 +24,10 @@ interface Turn {
 
 /** Each model gets its own conversation thread: its own past answers only,
  * not what the other models in a parallel-comparison turn said. */
-function buildHistoryForModel(turns: Turn[], model: string): ChatMessage[] {
+function buildHistoryForTarget(turns: Turn[], targetId: string): ChatMessage[] {
   const history: ChatMessage[] = [];
   for (const turn of turns) {
-    const reply = turn.replies.find((r) => r.model === model);
+    const reply = turn.replies.find((r) => r.target.id === targetId);
     if (!reply) continue;
     history.push({ role: "user", content: turn.userText });
     history.push({ role: "assistant", content: reply.content });
@@ -36,23 +37,62 @@ function buildHistoryForModel(turns: Turn[], model: string): ChatMessage[] {
 
 function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [status, setStatus] = useState<OllamaStatus>("checking");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [thinkMode, setThinkMode] = useState(false);
+  const [onlineMode, setOnlineMode] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const isStreaming =
     turns.length > 0 && turns[turns.length - 1].replies.some((r) => r.status === "streaming");
+
+  const localTargets: ModelTarget[] = useMemo(
+    () =>
+      models.map((m) => ({
+        id: `ollama:${m.name}`,
+        provider: "ollama",
+        model: m.name,
+        label: m.name,
+      })),
+    [models],
+  );
+
+  const onlineTargets: ModelTarget[] = useMemo(
+    () =>
+      providers
+        .filter((p) => p.configured)
+        .map((p) => ({
+          id: `${p.id}:${p.default_model}`,
+          provider: p.id,
+          model: p.default_model,
+          label: p.label,
+        })),
+    [providers],
+  );
+
+  const availableTargets = onlineMode ? [...localTargets, ...onlineTargets] : localTargets;
+  const targetsById = useMemo(() => {
+    const map = new Map<string, ModelTarget>();
+    for (const t of availableTargets) map.set(t.id, t);
+    return map;
+  }, [availableTargets]);
+
+  function refreshProviders() {
+    invoke<ProviderInfo[]>("list_providers").then(setProviders).catch(() => {});
+  }
 
   useEffect(() => {
     invoke<ModelInfo[]>("list_ollama_models")
       .then((list) => {
         setModels(list);
         setStatus("connected");
-        setSelectedModels(list.map((m) => m.name));
+        setSelectedIds(list.map((m) => `ollama:${m.name}`));
       })
       .catch(() => setStatus("unreachable"));
+    refreshProviders();
   }, []);
 
   useEffect(() => {
@@ -98,19 +138,18 @@ function App() {
     };
   }, []);
 
-  function toggleModel(name: string) {
-    setSelectedModels((prev) =>
-      prev.includes(name) ? prev.filter((m) => m !== name) : [...prev, name],
-    );
+  function toggleTarget(id: string) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]));
   }
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || selectedModels.length === 0 || isStreaming) return;
+    const targets = selectedIds.map((id) => targetsById.get(id)).filter((t): t is ModelTarget => !!t);
+    if (!text || targets.length === 0 || isStreaming) return;
 
     const priorTurns = turns;
-    const replies: ModelReply[] = selectedModels.map((model) => ({
-      model,
+    const replies: ModelReply[] = targets.map((target) => ({
+      target,
       requestId: crypto.randomUUID(),
       content: "",
       status: "streaming",
@@ -121,12 +160,13 @@ function App() {
 
     for (const reply of replies) {
       const outgoing: ChatMessage[] = [
-        ...buildHistoryForModel(priorTurns, reply.model),
+        ...buildHistoryForTarget(priorTurns, reply.target.id),
         { role: "user", content: text },
       ];
       invoke("send_chat", {
         requestId: reply.requestId,
-        model: reply.model,
+        provider: reply.target.provider,
+        model: reply.target.model,
         messages: outgoing,
         think: thinkMode,
       }).catch((err) => {
@@ -174,22 +214,41 @@ function App() {
                 🧠 じっくり
               </button>
             </div>
+            <div className="think-toggle" role="group" aria-label="オンライン連携">
+              <button
+                className={onlineMode ? "active" : ""}
+                onClick={() => setOnlineMode((v) => !v)}
+                disabled={isStreaming}
+                title="Claude/ChatGPT/Gemini/Grokも比較対象に含める"
+              >
+                🌐 オンライン
+              </button>
+            </div>
             <div className="model-select" role="group" aria-label="比較するモデル">
-              {models.map((m) => (
+              {availableTargets.map((t) => (
                 <button
-                  key={m.name}
-                  className={selectedModels.includes(m.name) ? "active" : ""}
-                  onClick={() => toggleModel(m.name)}
+                  key={t.id}
+                  className={selectedIds.includes(t.id) ? "active" : ""}
+                  onClick={() => toggleTarget(t.id)}
                   disabled={isStreaming}
-                  title={m.parameter_size ?? ""}
+                  title={t.provider}
                 >
-                  {m.name}
+                  {t.label}
                 </button>
               ))}
             </div>
+            <button className="settings-button" onClick={() => setSettingsOpen(true)} title="APIキー設定">
+              ⚙️
+            </button>
           </>
         )}
       </header>
+
+      {onlineMode && onlineTargets.length === 0 && (
+        <div className="online-hint">
+          オンラインで比較するには⚙️からAPIキーを設定してください
+        </div>
+      )}
 
       <main className="turns">
         {turns.length === 0 && (
@@ -210,7 +269,7 @@ function App() {
                 return (
                   <div key={r.requestId} className={`reply-panel reply-${r.status}`}>
                     <div className="reply-header">
-                      <span className="reply-model">{r.model}</span>
+                      <span className="reply-model">{r.target.label}</span>
                       <span className={`reply-status reply-status-${r.status}`}>
                         {r.status === "streaming" ? (stillThinking ? "思考中…" : "生成中…") : r.status}
                       </span>
@@ -245,11 +304,19 @@ function App() {
         />
         <button
           onClick={handleSend}
-          disabled={status !== "connected" || isStreaming || !input.trim() || selectedModels.length === 0}
+          disabled={status !== "connected" || isStreaming || !input.trim() || selectedIds.length === 0}
         >
-          {isStreaming ? "生成中…" : `送信 (${selectedModels.length})`}
+          {isStreaming ? "生成中…" : `送信 (${selectedIds.length})`}
         </button>
       </footer>
+
+      {settingsOpen && (
+        <Settings
+          providers={providers}
+          onClose={() => setSettingsOpen(false)}
+          onChanged={refreshProviders}
+        />
+      )}
     </div>
   );
 }
