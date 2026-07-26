@@ -1,3 +1,4 @@
+mod catalog;
 mod commands;
 mod credentials;
 mod engines;
@@ -21,6 +22,9 @@ pub fn run() {
             commands::list_providers,
             commands::save_api_key,
             commands::clear_api_key,
+            commands::detect_hardware,
+            commands::recommend_models,
+            commands::pull_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

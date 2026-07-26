@@ -245,6 +245,11 @@ body,
   align-items: center;
   font-weight: 700;
   margin-bottom: 8px;
+  position: sticky;
+  top: 0;
+  background-color: inherit;
+  padding-bottom: 8px;
+  z-index: 1;
 }
 
 .settings-header button {
@@ -365,6 +370,29 @@ select,
 button,
 .composer textarea {
   outline: none;
+}
+
+.catalog-origin {
+  font-weight: 400;
+  opacity: 0.55;
+  font-size: 0.85em;
+  margin-left: 6px;
+}
+
+.catalog-description {
+  font-size: 0.82em;
+  opacity: 0.7;
+  margin: 0 0 6px;
+}
+
+.catalog-installed {
+  font-size: 0.82em;
+  color: #2f9e44;
+}
+
+.catalog-progress {
+  font-size: 0.82em;
+  opacity: 0.75;
 }
 
 @media (prefers-color-scheme: dark) {

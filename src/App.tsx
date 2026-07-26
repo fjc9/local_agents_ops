@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ChatMessage, ChatStreamEvent, ModelInfo, ModelTarget, ProviderInfo } from "./types";
 import Settings from "./Settings";
+import Catalog from "./Catalog";
 import "./App.css";
 
 type OllamaStatus = "checking" | "connected" | "unreachable";
@@ -45,6 +46,7 @@ function App() {
   const [thinkMode, setThinkMode] = useState(false);
   const [onlineMode, setOnlineMode] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
 
   const isStreaming =
     turns.length > 0 && turns[turns.length - 1].replies.some((r) => r.status === "streaming");
@@ -82,6 +84,20 @@ function App() {
 
   function refreshProviders() {
     invoke<ProviderInfo[]>("list_providers").then(setProviders).catch(() => {});
+  }
+
+  function refreshModels() {
+    invoke<ModelInfo[]>("list_ollama_models")
+      .then((list) => {
+        setModels(list);
+        setStatus("connected");
+        setSelectedIds((prev) => {
+          const known = new Set(prev);
+          const additions = list.map((m) => `ollama:${m.name}`).filter((id) => !known.has(id));
+          return [...prev, ...additions];
+        });
+      })
+      .catch(() => setStatus("unreachable"));
   }
 
   useEffect(() => {
@@ -237,6 +253,9 @@ function App() {
                 </button>
               ))}
             </div>
+            <button className="settings-button" onClick={() => setCatalogOpen(true)} title="モデルカタログ">
+              📦
+            </button>
             <button className="settings-button" onClick={() => setSettingsOpen(true)} title="APIキー設定">
               ⚙️
             </button>
@@ -315,6 +334,14 @@ function App() {
           providers={providers}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshProviders}
+        />
+      )}
+
+      {catalogOpen && (
+        <Catalog
+          installedModels={models}
+          onClose={() => setCatalogOpen(false)}
+          onModelsChanged={refreshModels}
         />
       )}
     </div>

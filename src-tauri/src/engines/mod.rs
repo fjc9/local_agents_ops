@@ -68,6 +68,27 @@ pub struct ChatOptions {
     pub think: bool,
 }
 
+/// Progress for a model download, forwarded to the frontend as a
+/// `pull-progress` Tauri event, tagged by model name rather than a
+/// request id since pulls aren't tied to a chat turn.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PullProgressEvent {
+    Progress {
+        model: String,
+        status: String,
+        completed: Option<u64>,
+        total: Option<u64>,
+    },
+    Done {
+        model: String,
+    },
+    Error {
+        model: String,
+        message: String,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("could not reach engine at {0}: {1}")]

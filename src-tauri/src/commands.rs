@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 
+use crate::catalog::{self, CatalogEntry, HardwareProfile};
 use crate::credentials;
 use crate::engines::anthropic::AnthropicBackend;
 use crate::engines::gemini::GeminiBackend;
@@ -130,4 +131,33 @@ pub async fn send_chat(
         }
         other => Err(format!("unknown provider: {other}")),
     }
+}
+
+#[tauri::command]
+pub fn detect_hardware() -> HardwareProfile {
+    catalog::detect_hardware()
+}
+
+#[tauri::command]
+pub fn recommend_models() -> Vec<CatalogEntry> {
+    let profile = catalog::detect_hardware();
+    catalog::recommend(&profile, 10)
+}
+
+/// Streams `ollama pull` progress as `pull-progress` events. Returns once
+/// the pull finishes or errors, mirroring the fire-and-forget shape of
+/// `send_chat` -- the frontend listens for the events, not the return value.
+#[tauri::command]
+pub async fn pull_model(app: AppHandle, state: State<'_, AppState>, model: String) -> Result<(), String> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    let forward_app = app.clone();
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = forward_app.emit("pull-progress", &event);
+        }
+    });
+
+    state.ollama.clone().pull_model(model, tx).await;
+    Ok(())
 }

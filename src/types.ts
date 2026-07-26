@@ -31,3 +31,22 @@ export interface ModelTarget {
   model: string;
   label: string;
 }
+
+export interface HardwareProfile {
+  os: string;
+  total_ram_gb: number;
+}
+
+export interface CatalogEntry {
+  tag: string;
+  origin: string;
+  label: string;
+  size_gb: number;
+  role: string;
+  description: string;
+}
+
+export type PullProgressEvent =
+  | { type: "progress"; model: string; status: string; completed: number | null; total: number | null }
+  | { type: "done"; model: string }
+  | { type: "error"; model: string; message: string };

@@ -3,7 +3,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{ChatMessage, ChatOptions, ChatStreamEvent, EngineError, InferenceBackend, ModelInfo};
+use super::{
+    ChatMessage, ChatOptions, ChatStreamEvent, EngineError, InferenceBackend, ModelInfo,
+    PullProgressEvent,
+};
 
 pub struct OllamaBackend {
     base_url: String,
@@ -39,6 +42,99 @@ impl OllamaBackend {
             .await
             .map_err(|e| EngineError::Parse(e.to_string()))?;
         Ok(body.version)
+    }
+
+    /// Pulls a model, forwarding Ollama's own download-progress lines
+    /// (manifest -> per-layer digest download -> verify -> success) as
+    /// they arrive rather than waiting for the whole multi-GB transfer.
+    pub async fn pull_model(&self, model: String, sender: UnboundedSender<PullProgressEvent>) {
+        let url = format!("{}/api/pull", self.base_url);
+        let resp = match self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({ "name": &model, "stream": true }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = sender.send(PullProgressEvent::Error {
+                    model,
+                    message: e.to_string(),
+                });
+                return;
+            }
+        };
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let _ = sender.send(PullProgressEvent::Error {
+                model,
+                message: format!("{status}: {text}"),
+            });
+            return;
+        }
+
+        let mut byte_stream = resp.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = sender.send(PullProgressEvent::Error {
+                        model,
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+            };
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer.drain(..=newline_pos);
+                if line.is_empty() {
+                    continue;
+                }
+
+                let value: serde_json::Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
+                    let _ = sender.send(PullProgressEvent::Error {
+                        model,
+                        message: err.to_string(),
+                    });
+                    return;
+                }
+
+                let status = value
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let completed = value.get("completed").and_then(|v| v.as_u64());
+                let total = value.get("total").and_then(|v| v.as_u64());
+
+                let is_success = status == "success";
+                let _ = sender.send(PullProgressEvent::Progress {
+                    model: model.clone(),
+                    status,
+                    completed,
+                    total,
+                });
+                if is_success {
+                    let _ = sender.send(PullProgressEvent::Done { model });
+                    return;
+                }
+            }
+        }
+
+        let _ = sender.send(PullProgressEvent::Done { model });
     }
 }
 
