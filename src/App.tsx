@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ChatMessage, ChatStreamEvent, ModelInfo, ModelTarget, ProviderInfo } from "./types";
@@ -47,6 +47,7 @@ function App() {
   const [onlineMode, setOnlineMode] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const isComposingRef = useRef(false);
 
   const isStreaming =
     turns.length > 0 && turns[turns.length - 1].replies.some((r) => r.status === "streaming");
@@ -312,11 +313,22 @@ function App() {
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false;
+          }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
+            if (e.key !== "Enter" || e.shiftKey) return;
+            // IME conversion-confirm also fires an Enter keydown. Guard with
+            // all three signals -- WebKit (Tauri's macOS webview) doesn't
+            // reliably mark that keydown as isComposing, so the ref from
+            // compositionstart/end and the legacy keyCode 229 check both
+            // matter, not just nativeEvent.isComposing.
+            if (isComposingRef.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+            e.preventDefault();
+            handleSend();
           }}
           placeholder="プロンプトを入力 (Enterで送信 / Shift+Enterで改行)"
           disabled={status !== "connected" || isStreaming}
