@@ -104,9 +104,6 @@ pub enum EngineError {
 /// a given model is actually running on.
 #[async_trait]
 pub trait InferenceBackend: Send + Sync {
-    /// Human-readable identifier for this backend, e.g. "ollama".
-    fn engine_name(&self) -> &'static str;
-
     /// Models this backend currently has available to serve.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, EngineError>;
 

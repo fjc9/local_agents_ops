@@ -115,14 +115,14 @@ pub async fn send_chat(
         "openai" => {
             let key = credentials::get_key("openai")
                 .ok_or_else(|| "OpenAI APIキーが未設定です".to_string())?;
-            OpenAiCompatBackend::new("openai", "https://api.openai.com/v1", key, "gpt-5.6")
+            OpenAiCompatBackend::new("https://api.openai.com/v1", key, "gpt-5.6")
                 .chat_stream(request_id, &model, &messages, options, tx)
                 .await
                 .map_err(|e| e.to_string())
         }
         "xai" => {
             let key = credentials::get_key("xai").ok_or_else(|| "xAI APIキーが未設定です".to_string())?;
-            OpenAiCompatBackend::new("xai", "https://api.x.ai/v1", key, "grok-4.3")
+            OpenAiCompatBackend::new("https://api.x.ai/v1", key, "grok-4.3")
                 .chat_stream(request_id, &model, &messages, options, tx)
                 .await
                 .map_err(|e| e.to_string())

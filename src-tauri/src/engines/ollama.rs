@@ -208,7 +208,10 @@ impl OllamaBackend {
             }
         }
 
-        let _ = sender.send(PullProgressEvent::Done { model });
+        let _ = sender.send(PullProgressEvent::Error {
+            model,
+            message: "download stream ended before Ollama reported success".to_string(),
+        });
     }
 }
 
@@ -265,10 +268,6 @@ struct ChatStreamMessage {
 
 #[async_trait]
 impl InferenceBackend for OllamaBackend {
-    fn engine_name(&self) -> &'static str {
-        "ollama"
-    }
-
     async fn list_models(&self) -> Result<Vec<ModelInfo>, EngineError> {
         let url = format!("{}/api/tags", self.base_url);
         let resp = self

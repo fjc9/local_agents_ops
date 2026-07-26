@@ -51,10 +51,6 @@ struct AnthropicRequest {
 
 #[async_trait]
 impl InferenceBackend for AnthropicBackend {
-    fn engine_name(&self) -> &'static str {
-        "anthropic"
-    }
-
     async fn list_models(&self) -> Result<Vec<ModelInfo>, EngineError> {
         Ok(vec![ModelInfo {
             name: "claude-opus-4-8".to_string(),

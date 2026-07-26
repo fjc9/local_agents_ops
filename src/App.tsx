@@ -43,7 +43,7 @@ function buildHistoryForTarget(turns: Turn[], targetId: string): ChatMessage[] {
   for (const turn of turns) {
     const reply = turn.replies.find((r) => r.target.id === targetId);
     if (!reply) continue;
-    history.push({ role: "user", content: turn.userText });
+    history.push({ role: "user", content: reply.sentContent ?? turn.userText });
     history.push({ role: "assistant", content: reply.content });
   }
   return history;
@@ -114,6 +114,10 @@ function App() {
     for (const t of availableTargets) map.set(t.id, t);
     return map;
   }, [availableTargets]);
+  const selectedTargets = useMemo(
+    () => selectedIds.map((id) => targetsById.get(id)).filter((t): t is ModelTarget => !!t),
+    [selectedIds, targetsById],
+  );
 
   function refreshProviders() {
     invoke<ProviderInfo[]>("list_providers").then(setProviders).catch(() => {});
@@ -236,7 +240,7 @@ function App() {
 
   async function handleSend() {
     const text = input.trim();
-    const targets = selectedIds.map((id) => targetsById.get(id)).filter((t): t is ModelTarget => !!t);
+    const targets = selectedTargets;
     if (!text || targets.length === 0 || isStreaming) return;
 
     const priorTurns = turns;
@@ -269,46 +273,50 @@ function App() {
 
     if (onlineSelected.length === 0) return;
 
-    const sendOnlineDirect = () => {
-      for (const target of onlineSelected) {
-        const reply = replyByTargetId.get(target.id);
-        if (!reply) continue;
-        const outgoing: ChatMessage[] = [
-          ...buildHistoryForTarget(priorTurns, target.id),
-          { role: "user", content: text },
-        ];
-        sendToTarget(reply, outgoing);
-      }
+    const sendOnlineDirect = (target: ModelTarget) => {
+      const reply = replyByTargetId.get(target.id);
+      if (!reply) return;
+      const outgoing: ChatMessage[] = [
+        ...buildHistoryForTarget(priorTurns, target.id),
+        { role: "user", content: text },
+      ];
+      sendToTarget(reply, outgoing);
     };
 
     if (!parentModel) {
-      sendOnlineDirect();
+      for (const target of onlineSelected) sendOnlineDirect(target);
       return;
     }
 
     setRouting(true);
     try {
-      const representativeHistory = buildHistoryForTarget(priorTurns, onlineSelected[0].id);
-      const decision = await invoke<RouterDecision>("route_and_compress", {
-        parentModel,
-        candidateProviders: onlineSelected.map((t) => t.provider),
-        history: representativeHistory,
-        newMessage: text,
-      });
+      await Promise.all(
+        onlineSelected.map(async (target) => {
+          const reply = replyByTargetId.get(target.id);
+          if (!reply) return;
 
-      for (const target of onlineSelected) {
-        const reply = replyByTargetId.get(target.id);
-        if (!reply) continue;
-        if (decision.providers.includes(target.provider)) {
-          updateReplyByRequestId(reply.requestId, (r) => ({ ...r, sentContent: decision.compressed_prompt }));
-          sendToTarget(reply, [{ role: "user", content: decision.compressed_prompt }]);
-        } else {
-          updateReplyByRequestId(reply.requestId, (r) => ({ ...r, status: "skipped" }));
-        }
-      }
+          try {
+            const decision = await invoke<RouterDecision>("route_and_compress", {
+              parentModel,
+              candidateProviders: [target.provider],
+              history: buildHistoryForTarget(priorTurns, target.id),
+              newMessage: text,
+            });
+
+            if (decision.providers.includes(target.provider)) {
+              updateReplyByRequestId(reply.requestId, (r) => ({ ...r, sentContent: decision.compressed_prompt }));
+              sendToTarget(reply, [{ role: "user", content: decision.compressed_prompt }]);
+            } else {
+              updateReplyByRequestId(reply.requestId, (r) => ({ ...r, status: "skipped" }));
+            }
+          } catch (err) {
+            console.error(`routing failed for ${target.id}, falling back to a direct send:`, err);
+            sendOnlineDirect(target);
+          }
+        }),
+      );
     } catch (err) {
-      console.error("routing failed, falling back to a direct send:", err);
-      sendOnlineDirect();
+      console.error("routing failed unexpectedly:", err);
     } finally {
       setRouting(false);
     }
@@ -486,9 +494,9 @@ function App() {
         />
         <button
           onClick={handleSend}
-          disabled={status !== "connected" || isStreaming || !input.trim() || selectedIds.length === 0}
+          disabled={status !== "connected" || isStreaming || !input.trim() || selectedTargets.length === 0}
         >
-          {isStreaming ? "生成中…" : `送信 (${selectedIds.length})`}
+          {isStreaming ? "生成中…" : `送信 (${selectedTargets.length})`}
         </button>
       </footer>
 

@@ -9,7 +9,6 @@ use super::{ChatMessage, ChatOptions, ChatRole, ChatStreamEvent, EngineError, In
 /// OpenAI itself and xAI's Grok, which intentionally mirrors the same wire
 /// format so existing OpenAI clients work against it unchanged.
 pub struct OpenAiCompatBackend {
-    engine_name: &'static str,
     base_url: String,
     api_key: String,
     default_model: String,
@@ -17,13 +16,11 @@ pub struct OpenAiCompatBackend {
 
 impl OpenAiCompatBackend {
     pub fn new(
-        engine_name: &'static str,
         base_url: impl Into<String>,
         api_key: String,
         default_model: impl Into<String>,
     ) -> Self {
         Self {
-            engine_name,
             base_url: base_url.into(),
             api_key,
             default_model: default_model.into(),
@@ -46,10 +43,6 @@ struct OaiRequest {
 
 #[async_trait]
 impl InferenceBackend for OpenAiCompatBackend {
-    fn engine_name(&self) -> &'static str {
-        self.engine_name
-    }
-
     async fn list_models(&self) -> Result<Vec<ModelInfo>, EngineError> {
         Ok(vec![ModelInfo {
             name: self.default_model.clone(),

@@ -18,10 +18,6 @@ impl GeminiBackend {
 
 #[async_trait]
 impl InferenceBackend for GeminiBackend {
-    fn engine_name(&self) -> &'static str {
-        "gemini"
-    }
-
     async fn list_models(&self) -> Result<Vec<ModelInfo>, EngineError> {
         Ok(vec![ModelInfo {
             name: DEFAULT_MODEL.to_string(),

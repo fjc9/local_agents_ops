@@ -124,10 +124,8 @@ fn parse_decision(raw: &str, candidates: &[String]) -> Result<RouterDecision, Ro
         .ok_or_else(|| RouterError::Parse("missing compressed_prompt".to_string()))?
         .to_string();
 
-    if providers.is_empty() || compressed_prompt.trim().is_empty() {
-        return Err(RouterError::Parse(
-            "empty providers or compressed_prompt".to_string(),
-        ));
+    if compressed_prompt.trim().is_empty() {
+        return Err(RouterError::Parse("empty compressed_prompt".to_string()));
     }
 
     Ok(RouterDecision {
