@@ -621,16 +621,18 @@ mod tests {
 
     /// These talk to a real Ollama, so they're ignored by default. Setup:
     ///   ollama serve
-    ///   ollama pull smollm2:135m
+    ///   ollama pull llama3.2:3b
+    ///   ollama pull qwen3:0.6b
     ///   cargo test --lib -- --ignored engines::ollama
     ///
-    /// A deliberately tiny non-thinking model: 270MB, and its answers arrive
-    /// fast enough on a CPU-only machine to keep the test usable there.
-    const NON_THINKING_MODEL: &str = "smollm2:135m";
-
-    /// The smallest thinking-capable model available, for the other side of the
-    /// capability gate: `ollama pull qwen3:0.6b`.
+    /// The two sides of the capability gate. Both are models someone would
+    /// actually keep installed -- an English-only toy model was used here at
+    /// first, which made the suite depend on a model nobody wants on the machine.
+    const NON_THINKING_MODEL: &str = "llama3.2:3b";
     const THINKING_MODEL: &str = "qwen3:0.6b";
+
+    /// Under the 1GB calibration floor, for the test that the floor holds.
+    const TINY_MODEL: &str = "qwen3:0.6b";
 
     #[tokio::test]
     #[ignore]
@@ -686,10 +688,6 @@ mod tests {
         assert!(!thinking.is_empty(), "expected a reasoning trace to come through");
     }
 
-    /// A model of the size someone would actually run:
-    ///   ollama pull llama3.2:3b
-    const REALISTIC_MODEL: &str = "llama3.2:3b";
-
     async fn generate_once(ollama: &OllamaBackend, model: &str) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         ollama
@@ -722,7 +720,7 @@ mod tests {
             "a fresh backend should admit it hasn't measured anything"
         );
 
-        generate_once(&ollama, REALISTIC_MODEL).await;
+        generate_once(&ollama, NON_THINKING_MODEL).await;
 
         let observed = ollama
             .observed_gb_per_sec()
@@ -735,19 +733,19 @@ mod tests {
 
     /// Tiny models are excluded from calibration on purpose.
     ///
-    /// Measured on the reference machine: the 270MB model implied 49.6 GB/s
-    /// where 2.0GB and 4.9GB models implied 36.4 and 37.7. Calibrating off the
-    /// small one made every estimate optimistic by up to 27% -- and optimistic
-    /// is the harmful direction, because the speed gate then recommends models
-    /// that turn out to be slower than promised.
+    /// Measured on the reference machine: a 270MB model implied 49.6 GB/s where
+    /// 2.0GB and 4.9GB models implied 36.4 and 37.7. Calibrating off the small
+    /// one made every estimate optimistic by up to 27% -- and optimistic is the
+    /// harmful direction, because the speed gate then recommends models that
+    /// turn out to be slower than promised.
     #[tokio::test]
     #[ignore]
     async fn a_tiny_model_does_not_get_to_set_the_calibration() {
         let ollama = OllamaBackend::default_local();
-        generate_once(&ollama, NON_THINKING_MODEL).await;
+        generate_once(&ollama, TINY_MODEL).await;
         assert!(
             ollama.observed_gb_per_sec().is_none(),
-            "a 270MB model should not be treated as representative"
+            "a sub-1GB model should not be treated as representative"
         );
     }
 

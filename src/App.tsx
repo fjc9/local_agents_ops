@@ -22,12 +22,6 @@ const ONLINE_PROVIDER_IDS = new Set(["anthropic", "openai", "gemini", "xai"]);
 const PARENT_MODEL_STORAGE_KEY = "localAgentsOps.parentModel";
 const SERIALIZE_LOCAL_STORAGE_KEY = "localAgentsOps.serializeLocal";
 
-/** Windows IME can fire `compositionend` *before* the Enter keydown that
- * confirmed the conversion, leaving every composing signal reading false.
- * Enter arriving within this window of a composition ending is treated as
- * the confirm key, not as "send". Short enough to stay imperceptible. */
-const COMPOSITION_ENTER_GRACE_MS = 100;
-
 /** Mirrors the Rust catalog's estimates so the UI can warn before a
  * selection is sent, rather than after Ollama starts thrashing:
  * loaded weights need meaningfully more RAM than the on-disk size, and
@@ -164,7 +158,6 @@ function App() {
     }
   });
   const isComposingRef = useRef(false);
-  const lastCompositionEndRef = useRef(0);
 
   /** The backend owns the actual behaviour, so push the preference through on
    * every change and once at startup -- a value restored from localStorage that
@@ -222,6 +215,9 @@ function App() {
         })),
     [providers],
   );
+
+  // Both modifiers work everywhere; the label just follows the local habit.
+  const sendShortcutLabel = hardware?.os === "macos" ? "⌘+Enter" : "Ctrl+Enter";
 
   const availableTargets = onlineMode ? [...localTargets, ...onlineTargets] : localTargets;
   const targetsById = useMemo(() => {
@@ -756,26 +752,27 @@ function App() {
           }}
           onCompositionEnd={() => {
             isComposingRef.current = false;
-            lastCompositionEndRef.current = Date.now();
           }}
           onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.shiftKey) return;
-            // IME conversion-confirm also fires an Enter keydown. Guard with
-            // all three signals -- WebKit (Tauri's macOS webview) doesn't
-            // reliably mark that keydown as isComposing, so the ref from
-            // compositionstart/end and the legacy keyCode 229 check both
-            // matter, not just nativeEvent.isComposing.
+            // Ctrl+Enter sends (Cmd+Enter too, for the macOS habit); plain Enter
+            // inserts a newline.
+            //
+            // Enter-to-send cannot be made safe alongside an IME: the keypress
+            // that confirms a conversion is the same keypress that would submit.
+            // Guarding on isComposing, the legacy keyCode 229, a
+            // compositionstart/end ref and a grace window after compositionend
+            // still let it through -- on Windows compositionend can land before
+            // the confirming keydown, at which point every one of those signals
+            // reads "not composing" and the keypress is indistinguishable from a
+            // deliberate Enter. Moving the shortcut is the only real fix.
+            if (e.key !== "Enter") return;
+            if (!e.ctrlKey && !e.metaKey) return;
+            // Still not mid-conversion, in case an IME maps this combination.
             if (isComposingRef.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
-            // The three checks above all read false in the opposite failure
-            // mode, seen on Windows: compositionend can land *before* the
-            // Enter keydown that confirmed the conversion, so that keydown is
-            // indistinguishable from a deliberate Enter. Treat Enter that
-            // arrives on the heels of a composition as the confirm key.
-            if (Date.now() - lastCompositionEndRef.current < COMPOSITION_ENTER_GRACE_MS) return;
             e.preventDefault();
             handleSend();
           }}
-          placeholder="プロンプトを入力 (Enterで送信 / Shift+Enterで改行)"
+          placeholder={`プロンプトを入力 (${sendShortcutLabel}で送信 / Enterで改行)`}
           disabled={status !== "connected" || isStreaming}
         />
         {isStreaming ? (
@@ -786,6 +783,7 @@ function App() {
           <button
             onClick={handleSend}
             disabled={status !== "connected" || !input.trim() || sendableTargets.length === 0}
+            title={`${sendShortcutLabel}でも送信できます`}
           >
             送信 ({sendableTargets.length})
           </button>

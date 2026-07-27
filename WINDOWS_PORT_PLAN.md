@@ -148,13 +148,20 @@ MSI（WiX 3）は生成対象から外した。非ASCIIパスや制限された�
 
 未署名 → NSIS配布ではSmartScreen警告は確実に出る。社内限定配布なら許容範囲か要判断。許容する場合は回避手順を社内向けに文書化する。
 
-### ⑥ IME入力
+### ⑥ IME入力【実機で再現、Ctrl+Enter送信に変更して解決】
 
-WebView2 (Chromium) では `isComposing` が正しく立つので `src/App.tsx:480` の三重チェックは効く。
+三重チェック（`isComposingRef` / `isComposing` / `keyCode 229`）に加えて `compositionend` 直後100msのガードも入れたが、**実機の日本語入力で依然としてEnterで誤送信された**。
 
-ただし**逆方向のリスク**がある。Windows IMEでは `compositionend` が `keydown` より先に発火するケースがあり、その瞬間は `isComposingRef=false` / `isComposing=false` / `keyCode=13` になって**三重チェックすべてをすり抜けて誤送信**し得る。macOS向けの対策ではこのパターンを救えない。
+Enter送信はIMEと原理的に両立しない。**変換を確定するキーと送信するキーが同一**で、Windowsには「`compositionend` が確定Enterの `keydown` より先に発火する」経路が実在する。その瞬間は上記シグナルすべてが「変換中でない」を返し、意図的なEnterと区別できない。ガードを足す方向では埋まらない。
 
-対策案: `compositionend` 直後の短時間（~100ms）のEnterを無視するガードを追加、または Ctrl+Enter 送信への変更（IMEユーザーには後者が安全）。
+**解決: ショートカットを移した。**
+
+| キー | 動作 |
+|---|---|
+| **Ctrl+Enter**（macOSでは ⌘+Enter も可） | 送信 |
+| Enter | 改行 |
+
+これで変換確定Enterが送信を引き起こす経路が構造的に消える。変換中の Ctrl+Enter は引き続き無視する（IMEがこの組み合わせを使う場合の保険）。不要になった100msガードと `lastCompositionEndRef` は削除した。プレースホルダの案内文もOS別に切り替える。
 
 ### ⑦ アイコン
 
@@ -446,16 +453,26 @@ winget upgrade --id Ollama.Ollama --exact --accept-source-agreements --accept-pa
 
 ### 導入済みモデル
 
-`llama3.2:3b`（2.0GB）/ `gemma3:4b`（3.3GB）/ `llama3.1:8b`（4.9GB）を導入し、速度モデルの検証に使用済み（2章）。カタログ記載サイズと実サイズは完全一致した。検証用に `smollm2:135m`（270MB、非thinking）と `qwen3:0.6b`（522MB、thinking対応）も保持。後者2つは capability ゲートの両側をテストするために必要。
+`llama3.2:3b`（2.0GB）/ `gemma3:4b`（3.3GB）/ `llama3.1:8b`（4.9GB）を導入し、速度モデルの検証に使用済み（2章）。カタログ記載サイズと実サイズは完全一致した。加えて `qwen3:0.6b`（522MB、thinking対応）を保持。
+
+`smollm2:135m` は**削除済み**。日本語を扱えない英語専用の検証用モデルで、実運用の対象にならない。当初これをテストの基準モデルにしていたが、そのせいで**テストスイートが「誰も端末に置きたくないモデル」に依存**していた。テスト用の定数を以下に付け替えた。
+
+| 用途 | 変更前 | 変更後 |
+|---|---|---|
+| 非thinkingモデル（capabilityゲートの否定側） | `smollm2:135m` | `llama3.2:3b` |
+| thinkingモデル（肯定側） | `qwen3:0.6b` | 変更なし |
+| 1GB未満（キャリブレーション下限の検証） | `smollm2:135m` | `qwen3:0.6b` |
+| RAM予算・キューのテスト | `smollm2:135m` (0.27GB) | `llama3.2:3b` (2.0GB) |
+
+2章の実測記録に出てくる `smollm2:135m` は当時の測定事実なのでそのまま残している。
 
 ### 人手が必要
 
-- **IMEの変換確定Enter** — GUI操作なので実機確認が必要。ガードは実装済み。`target/release/bundle/nsis/LocalAgentsOps_0.1.0_x64-setup.exe` を入れて「変換候補を出してEnterで確定」を試すこと
-- 実モデルでのRAM予算キュー発火（小さいモデルでは予算が埋まらない。経路自体は単体テスト済み）
+- Ctrl+Enter送信への変更後の再確認（⑥参照）。実機の日本語入力で、変換確定Enterが改行になり誤送信しないこと
+- 実モデルでのRAM予算キュー発火（22.2GBの予算に対し導入済みモデルの合計が16.3GBなので通常操作では埋まらない。経路自体は予算を絞った単体テストで検証済み）
 
 ### 判断待ち
 
-- **Enter送信を Ctrl+Enter に変更するか** — 見送り中。preference であって不具合ではなく、Enter送信を奪うと非IMEユーザーには機能後退になる。バグ自体は100msガードで対処済み
 - **モデルチップの並び替えを即時にするか遅延させるか** — 現在は即時（選択中を先頭）。トグルするとチップが動くので、連続クリック時に対象がずれる
 - **未署名配布（SmartScreen警告）を許容するか** — Phase 3 の案内文で足りるか
 - **Phase 4 のiGPU対応に踏み込むか** — 公式Ollamaでは不可、ipex-llm等の別バックエンド追加になる

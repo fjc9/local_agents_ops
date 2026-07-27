@@ -426,8 +426,10 @@ mod tests {
 
     /// The reference machine's budget: 31.7GB installed, 70% of it.
     const REFERENCE_BUDGET_GB: f64 = 22.2;
-    /// 270MB on disk, the smallest model installed for these tests.
-    const SMALL_MODEL_GB: f64 = 0.27;
+    /// A model these tests can count on being installed, and its on-disk size:
+    ///   ollama pull llama3.2:3b
+    const TEST_MODEL: &str = "llama3.2:3b";
+    const TEST_MODEL_GB: f64 = 2.0;
 
     fn state_with_budget(budget_gb: f64) -> AppState {
         AppState::new(Arc::new(OllamaBackend::default_local()), budget_gb)
@@ -436,7 +438,7 @@ mod tests {
     #[test]
     fn a_models_reservation_tracks_its_expected_footprint() {
         let total = (REFERENCE_BUDGET_GB * PERMITS_PER_GB) as u32;
-        let small = permits_for_size_gb(SMALL_MODEL_GB, total);
+        let small = permits_for_size_gb(TEST_MODEL_GB, total);
         let large = permits_for_size_gb(8.0, total);
         assert!(small < large);
         // 8GB on disk is ~12.8GB resident, i.e. over half of a 22.2GB budget.
@@ -469,14 +471,14 @@ mod tests {
     #[ignore]
     async fn serialising_makes_one_request_consume_the_whole_budget() {
         let state = state_with_budget(REFERENCE_BUDGET_GB);
-        let (parallel_share, _) = state.plan_reservation("smollm2:135m").await;
+        let (parallel_share, _) = state.plan_reservation(TEST_MODEL).await;
         assert!(
             parallel_share < state.total_local_permits,
             "a small model should leave room for others by default"
         );
 
         state.serialize_local.store(true, Ordering::Relaxed);
-        let (whole_budget, _) = state.plan_reservation("smollm2:135m").await;
+        let (whole_budget, _) = state.plan_reservation(TEST_MODEL).await;
         assert_eq!(whole_budget, state.total_local_permits);
 
         let _held = state
@@ -485,12 +487,12 @@ mod tests {
             .acquire_many_owned(whole_budget)
             .await
             .expect("reservation");
-        let (_, immediate) = state.plan_reservation("smollm2:135m").await;
+        let (_, immediate) = state.plan_reservation(TEST_MODEL).await;
         assert!(!immediate, "a second request must wait while serialising");
     }
 
     /// The queue actually firing. Needs a live Ollama with the small model:
-    ///   ollama pull smollm2:135m
+    ///   ollama pull llama3.2:3b
     ///   cargo test --lib -- --ignored queues_a_second_model
     ///
     /// Budget is set so exactly one copy of the model fits, which is what the
@@ -499,10 +501,10 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn queues_a_second_model_when_the_budget_is_already_committed() {
-        let one_model_only = catalog::resident_gb(SMALL_MODEL_GB);
+        let one_model_only = catalog::resident_gb(TEST_MODEL_GB);
         let state = state_with_budget(one_model_only);
 
-        let (needed, immediate) = state.plan_reservation("smollm2:135m").await;
+        let (needed, immediate) = state.plan_reservation(TEST_MODEL).await;
         assert!(immediate, "the first request should not have to wait");
         assert!(needed > 1, "expected a real reservation, got {needed}");
 
@@ -515,7 +517,7 @@ mod tests {
 
         // With the budget committed, a second request has to be announced as
         // queued rather than started.
-        let (_, immediate_again) = state.plan_reservation("smollm2:135m").await;
+        let (_, immediate_again) = state.plan_reservation(TEST_MODEL).await;
         assert!(!immediate_again, "second request should have to queue");
 
         // And it must actually get through once the first one finishes, rather
@@ -544,7 +546,7 @@ mod tests {
             "an idle machine should show the whole budget free"
         );
 
-        let (needed, _) = state.plan_reservation("smollm2:135m").await;
+        let (needed, _) = state.plan_reservation(TEST_MODEL).await;
         let _held = state
             .local_slots
             .clone()
@@ -563,8 +565,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_committed_budget_does_not_hold_up_online_providers() {
-        let state = state_with_budget(catalog::resident_gb(SMALL_MODEL_GB));
-        let (needed, _) = state.plan_reservation("smollm2:135m").await;
+        let state = state_with_budget(catalog::resident_gb(TEST_MODEL_GB));
+        let (needed, _) = state.plan_reservation(TEST_MODEL).await;
         let _held = state
             .local_slots
             .clone()
