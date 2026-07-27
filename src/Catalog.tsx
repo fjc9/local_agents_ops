@@ -85,8 +85,17 @@ function Catalog({ installedModels, onClose, onModelsChanged }: Props) {
         </div>
         {hardware && (
           <p className="settings-note">
-            検出したハードウェア: {hardware.os} / 総メモリ約{hardware.total_ram_gb.toFixed(0)}GB
-            — このマシンに収まりそうな、出所の異なるモデルを優先しておすすめしています。
+            検出したハードウェア: {hardware.os} / 総メモリ約{hardware.total_ram_gb.toFixed(0)}GB /{" "}
+            {hardware.logical_cores}スレッド
+            {hardware.accelerated ? " / GPUオフロード検出" : " / GPUオフロードなし"}
+            {hardware.observed_gb_per_sec != null &&
+              ` / 実測スループット ${hardware.observed_gb_per_sec.toFixed(0)}GB/s`}
+            <br />
+            {hardware.accelerated
+              ? "このマシンに収まる、出所の異なるモデルを優先しておすすめしています。"
+              : hardware.observed_gb_per_sec == null
+                ? "まだこのマシンでの生成実績がないため速度は未測定です。収まるモデルを軽い順に出しています。一度ローカルモデルに回答させると、以降は実測値で絞り込みます。"
+                : "GPUを使っていないため、生成速度は実測スループット÷モデルサイズで決まります。実用速度に届くものだけを、速い順におすすめしています。"}
           </p>
         )}
         {entries.map((entry) => {
@@ -104,7 +113,22 @@ function Catalog({ installedModels, onClose, onModelsChanged }: Props) {
                   {installed ? "導入済み" : `約${entry.size_gb.toFixed(1)}GB`}
                 </span>
               </div>
-              <p className="catalog-description">{entry.description}</p>
+              <p className="catalog-description">
+                {entry.description}
+                {entry.est_tokens_per_sec != null && (
+                  <>
+                    {" — このマシンで推定 約"}
+                    {entry.est_tokens_per_sec.toFixed(0)}
+                    {" tok/s"}
+                    {/* A MoE model reads only its active experts per token, so
+                        its speed comes from a much smaller number than its
+                        download size suggests. Say so, or the estimate looks
+                        like a mistake. */}
+                    {entry.active_size_gb < entry.size_gb &&
+                      `（MoE: 1トークンあたり約${entry.active_size_gb.toFixed(1)}GBのみ読み出し）`}
+                  </>
+                )}
+              </p>
               <div className="settings-row-controls">
                 {installed ? (
                   <span className="catalog-installed">✓ 選択候補に表示されます</span>
