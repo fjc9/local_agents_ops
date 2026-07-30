@@ -7,6 +7,22 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Shared HTTP client for every backend.
+///
+/// A connect timeout matters here; a request timeout does not. Streaming a long
+/// answer legitimately takes minutes on a machine with no GPU, so a deadline on
+/// the whole request would cut off healthy generations. A dead engine or an
+/// unreachable API, on the other hand, should fail in seconds rather than leave
+/// the UI waiting on a connection that will never open.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        // A builder failure here means TLS backend initialisation trouble, not
+        // anything the timeout caused; fall back rather than take down startup.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
@@ -27,6 +43,11 @@ pub struct ModelInfo {
     pub size_bytes: Option<u64>,
     pub parameter_size: Option<String>,
     pub quantization: Option<String>,
+    /// Whether the engine advertises a thinking capability for this model.
+    /// Surfaced to the UI so the 「じっくり」 toggle can say which of the
+    /// selected models it will actually change anything for.
+    #[serde(default)]
+    pub supports_thinking: bool,
 }
 
 /// One increment of a streaming chat response, forwarded to the frontend
@@ -35,6 +56,13 @@ pub struct ModelInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatStreamEvent {
+    /// The request is admitted but waiting: enough of the RAM budget is
+    /// already committed to other loaded models that starting now would mean
+    /// eviction or paging. Emitted so a queued model reads as "waiting its
+    /// turn" rather than as a panel that never woke up.
+    Queued {
+        request_id: String,
+    },
     /// Reasoning-model "thinking" trace, delivered separately from the
     /// final answer so the UI can show it as a distinct (collapsible)
     /// section instead of leaving the user staring at a blank bubble.
@@ -47,6 +75,11 @@ pub enum ChatStreamEvent {
         content: String,
     },
     Done {
+        request_id: String,
+    },
+    /// The user stopped this request. Distinct from `Error` so a deliberate
+    /// interruption doesn't get presented as a failure.
+    Cancelled {
         request_id: String,
     },
     Error {

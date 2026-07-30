@@ -87,9 +87,14 @@ body,
   border-color: rgba(214, 69, 69, 0.5);
 }
 
-.reply-panel.reply-skipped {
+.reply-panel.reply-skipped,
+.reply-panel.reply-cancelled {
   opacity: 0.6;
   border-style: dashed;
+}
+
+.reply-panel.reply-queued {
+  opacity: 0.7;
 }
 
 .routing-hint {

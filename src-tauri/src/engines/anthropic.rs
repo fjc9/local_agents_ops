@@ -19,7 +19,7 @@ impl AnthropicBackend {
     pub fn new(api_key: String) -> Self {
         Self {
             api_key,
-            client: reqwest::Client::new(),
+            client: super::http_client(),
         }
     }
 }
@@ -57,6 +57,8 @@ impl InferenceBackend for AnthropicBackend {
             size_bytes: None,
             parameter_size: None,
             quantization: None,
+            // This backend does forward `think` on as extended thinking.
+            supports_thinking: true,
         }])
     }
 

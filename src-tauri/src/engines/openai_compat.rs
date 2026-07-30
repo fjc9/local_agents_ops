@@ -49,6 +49,9 @@ impl InferenceBackend for OpenAiCompatBackend {
             size_bytes: None,
             parameter_size: None,
             quantization: None,
+            // `chat_stream` here ignores ChatOptions, so 「じっくり」 changes
+            // nothing for this backend regardless of what the model can do.
+            supports_thinking: false,
         }])
     }
 
@@ -61,7 +64,7 @@ impl InferenceBackend for OpenAiCompatBackend {
         sender: UnboundedSender<ChatStreamEvent>,
     ) -> Result<(), EngineError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let client = reqwest::Client::new();
+        let client = super::http_client();
 
         let body = OaiRequest {
             model: model.to_string(),
