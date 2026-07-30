@@ -109,8 +109,14 @@ fn full_catalog() -> Vec<CatalogEntry> {
         }
     }
 
+    // `active_size_gb` for a mixture-of-experts entry is derived as
+    // `size_gb * (active_params / total_params)` -- the same bytes-per-parameter
+    // the file already implies, applied to the subset actually read per token.
+    // For a dense model it equals `size_gb`. Sizes are the model layer as
+    // published on the Ollama registry, not estimates.
     vec![
         e("qwen3.5:9b", "Alibaba", "Qwen3.5 9B", 6.6, 6.6, "general", "軽量な汎用モデル"),
+        e("qwen3:4b", "Alibaba", "Qwen3 4B", 2.3, 2.3, "reasoning", "軽量ながらthinking対応"),
         e("qwen3.6:35b-a3b", "Alibaba", "Qwen3.6 35B-A3B", 23.0, 2.0, "general", "MoEで効率的な大型モデル"),
         e("qwen3-coder:30b", "Alibaba", "Qwen3 Coder 30B", 19.0, 2.0, "code", "コード生成特化のMoEモデル"),
         e("gemma3:4b", "Google", "Gemma3 4B", 3.3, 3.3, "router", "超軽量、ルーター役に最適"),
@@ -123,8 +129,14 @@ fn full_catalog() -> Vec<CatalogEntry> {
         e("llama3.3:70b", "Meta", "Llama 3.3 70B", 43.0, 43.0, "general", "大規模・高精度"),
         e("deepseek-r1:8b", "DeepSeek", "DeepSeek-R1 8B", 5.2, 5.2, "reasoning", "推論特化・軽量"),
         e("deepseek-r1:32b", "DeepSeek", "DeepSeek-R1 32B", 20.0, 20.0, "reasoning", "推論特化・高精度"),
+        // 15.7B total / 2.4B active, so it reads about a sixth of its file per
+        // token: the only code model in this catalog that a machine without a
+        // GPU can run at a usable speed.
+        e("deepseek-coder-v2:16b", "DeepSeek", "DeepSeek-Coder-V2 16B", 8.3, 1.3, "code", "コード特化のMoE・CPUでも高速"),
         e("phi4:14b", "Microsoft", "Phi-4 14B", 9.1, 9.1, "general", "コンパクトながら高性能"),
+        e("phi4-mini", "Microsoft", "Phi-4 mini 3.8B", 2.3, 2.3, "general", "超軽量な汎用モデル"),
         e("gpt-oss:20b", "OpenAI", "gpt-oss 20B", 13.0, 3.6, "general", "OpenAIのオープンウェイトモデル"),
+        e("granite3.3:8b", "IBM", "Granite 3.3 8B", 4.6, 4.6, "general", "IBM製・商用利用しやすいライセンス"),
     ]
 }
 
@@ -321,6 +333,19 @@ mod tests {
             assert!(est >= MIN_USABLE_TOKENS_PER_SEC, "{} too slow", entry.label);
             assert!(resident_gb(entry.size_gb) <= ram_budget_gb(&profile));
         }
+    }
+
+    /// The catalog has to offer this machine a code model it can actually run.
+    /// Every dense coder is too large, so this depends on MoE being judged by
+    /// active size -- without that, the code role is empty here.
+    #[test]
+    fn offers_a_code_model_this_machine_can_run() {
+        let picks = recommend(&cpu_only_laptop(), 12);
+        assert!(
+            picks.iter().any(|e| e.role == "code"),
+            "no code model survived the gates: {:?}",
+            picks.iter().map(|e| &e.tag).collect::<Vec<_>>()
+        );
     }
 
     /// A MoE model reads only its active experts per token, so it can clear

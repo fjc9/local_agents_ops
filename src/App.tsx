@@ -21,6 +21,7 @@ type ReplyStatus = "queued" | "streaming" | "done" | "error" | "skipped" | "canc
 const ONLINE_PROVIDER_IDS = new Set(["anthropic", "openai", "gemini", "xai"]);
 const PARENT_MODEL_STORAGE_KEY = "localAgentsOps.parentModel";
 const SERIALIZE_LOCAL_STORAGE_KEY = "localAgentsOps.serializeLocal";
+const DISABLED_MODELS_STORAGE_KEY = "localAgentsOps.disabledModels";
 
 /** Mirrors the Rust catalog's estimates so the UI can warn before a
  * selection is sent, rather than after Ollama starts thrashing:
@@ -142,6 +143,25 @@ function App() {
    * would have the catalog offer to download something already on disk, and
    * remove it from the parent-model choices in settings. */
   const [ejectedModels, setEjectedModels] = useState<Set<string>>(new Set());
+
+  /** Models installed but switched off in the catalog, so they stay off the
+   * comparison strip until switched back on.
+   *
+   * Three different notions of "not using this model" now coexist, and they
+   * answer different questions:
+   *   - not in `selectedIds`: not part of *this* turn's comparison.
+   *   - in `ejectedModels`: free its memory now; back on the next list refresh.
+   *   - here: don't offer it at all. Survives restarts.
+   * Downloading a model and wanting it in every comparison are separate
+   * decisions, which is what this one exists for. */
+  const [disabledModels, setDisabledModels] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem(DISABLED_MODELS_STORAGE_KEY);
+      return new Set<string>(stored ? JSON.parse(stored) : []);
+    } catch {
+      return new Set<string>();
+    }
+  });
   const [parentModel, setParentModel] = useState(() => {
     try {
       return localStorage.getItem(PARENT_MODEL_STORAGE_KEY) ?? "";
@@ -179,6 +199,25 @@ function App() {
     });
   }
 
+  function toggleModelEnabled(model: string) {
+    setDisabledModels((prev) => {
+      const next = new Set(prev);
+      if (next.has(model)) {
+        next.delete(model);
+      } else {
+        next.add(model);
+        // Switching a model off shouldn't leave it queued up for the next send.
+        setSelectedIds((ids) => ids.filter((id) => id !== `ollama:${model}`));
+      }
+      try {
+        localStorage.setItem(DISABLED_MODELS_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // Persistence is a nice-to-have; the setting still applies this session.
+      }
+      return next;
+    });
+  }
+
   function updateParentModel(model: string) {
     setParentModel(model);
     try {
@@ -198,14 +237,14 @@ function App() {
   const localTargets: ModelTarget[] = useMemo(
     () =>
       models
-        .filter((m) => !ejectedModels.has(m.name))
+        .filter((m) => !ejectedModels.has(m.name) && !disabledModels.has(m.name))
         .map((m) => ({
           id: `ollama:${m.name}`,
           provider: "ollama",
           model: m.name,
           label: m.name,
         })),
-    [models, ejectedModels],
+    [models, ejectedModels, disabledModels],
   );
 
   const onlineTargets: ModelTarget[] = useMemo(
@@ -819,6 +858,8 @@ function App() {
       {catalogOpen && (
         <Catalog
           installedModels={models}
+          disabledModels={disabledModels}
+          onToggleEnabled={toggleModelEnabled}
           onClose={() => setCatalogOpen(false)}
           onModelsChanged={refreshModels}
         />

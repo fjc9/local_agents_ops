@@ -5,6 +5,9 @@ import type { CatalogEntry, HardwareProfile, ModelInfo, PullProgressEvent } from
 
 interface Props {
   installedModels: ModelInfo[];
+  /** Installed but switched off, so it stays off the comparison strip. */
+  disabledModels: Set<string>;
+  onToggleEnabled: (model: string) => void;
   onClose: () => void;
   onModelsChanged: () => void;
 }
@@ -17,12 +20,33 @@ interface PullState {
   error?: string;
 }
 
-function Catalog({ installedModels, onClose, onModelsChanged }: Props) {
+/** Generation speed for an installed model, from the throughput the engine was
+ * measured at here. null when there's nothing to base it on -- the same rule the
+ * Rust catalog follows, rather than inventing a number for the UI. */
+function estimateTokensPerSec(
+  model: ModelInfo,
+  hardware: HardwareProfile | null,
+): number | null {
+  if (!model.size_bytes || !hardware || hardware.accelerated) return null;
+  if (hardware.observed_gb_per_sec == null) return null;
+  return hardware.observed_gb_per_sec / (model.size_bytes / 1024 ** 3);
+}
+
+function Catalog({
+  installedModels,
+  disabledModels,
+  onToggleEnabled,
+  onClose,
+  onModelsChanged,
+}: Props) {
   const [hardware, setHardware] = useState<HardwareProfile | null>(null);
   const [entries, setEntries] = useState<CatalogEntry[]>([]);
   const [pulls, setPulls] = useState<Record<string, PullState>>({});
 
   const installedTags = new Set(installedModels.map((m) => m.name));
+  // Recommendations still worth offering, i.e. not already on disk.
+  const notInstalled = entries.filter((entry) => !installedTags.has(entry.tag));
+  const entryByTag = new Map(entries.map((entry) => [entry.tag, entry]));
 
   useEffect(() => {
     invoke<HardwareProfile>("detect_hardware").then(setHardware).catch(() => {});
@@ -98,8 +122,53 @@ function Catalog({ installedModels, onClose, onModelsChanged }: Props) {
                 : "GPUを使っていないため、生成速度は実測スループット÷モデルサイズで決まります。実用速度に届くものだけを、速い順におすすめしています。"}
           </p>
         )}
-        {entries.map((entry) => {
-          const installed = installedTags.has(entry.tag);
+
+        <div className="settings-header" style={{ marginTop: 4 }}>
+          <span>導入済み（{installedModels.length}）</span>
+        </div>
+        {installedModels.length === 0 && (
+          <p className="settings-note">まだモデルがありません。下からダウンロードしてください。</p>
+        )}
+        {installedModels.map((model) => {
+          const enabled = !disabledModels.has(model.name);
+          const entry = entryByTag.get(model.name);
+          const estimate = estimateTokensPerSec(model, hardware);
+          const sizeGb = model.size_bytes ? model.size_bytes / 1024 ** 3 : null;
+          return (
+            <div key={model.name} className="settings-row">
+              <div className="settings-row-header">
+                <span className="settings-label">
+                  {model.name}
+                  {entry && <span className="catalog-origin"> {entry.origin}</span>}
+                </span>
+                <span className={`settings-status ${enabled ? "ok" : ""}`}>
+                  {enabled ? "使用する" : "使用しない"}
+                </span>
+              </div>
+              <p className="catalog-description">
+                {sizeGb != null && `約${sizeGb.toFixed(1)}GB`}
+                {model.supports_thinking && " / じっくり対応"}
+                {estimate != null && ` / このマシンで推定 約${estimate.toFixed(0)} tok/s`}
+                {entry && ` — ${entry.description}`}
+              </p>
+              <div className="settings-row-controls">
+                <button onClick={() => onToggleEnabled(model.name)}>
+                  {enabled ? "使用しない" : "使用する"}
+                </button>
+                {!enabled && (
+                  <span className="catalog-installed">比較の選択肢から外しています</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        {notInstalled.length > 0 && (
+          <div className="settings-header" style={{ marginTop: 4 }}>
+            <span>このマシンで動かせるおすすめ（{notInstalled.length}）</span>
+          </div>
+        )}
+        {notInstalled.map((entry) => {
           const pull = pulls[entry.tag];
           const pct =
             pull?.completed != null && pull?.total ? Math.round((pull.completed / pull.total) * 100) : null;
@@ -109,9 +178,7 @@ function Catalog({ installedModels, onClose, onModelsChanged }: Props) {
                 <span className="settings-label">
                   {entry.label} <span className="catalog-origin">{entry.origin}</span>
                 </span>
-                <span className={`settings-status ${installed ? "ok" : ""}`}>
-                  {installed ? "導入済み" : `約${entry.size_gb.toFixed(1)}GB`}
-                </span>
+                <span className="settings-status">約{entry.size_gb.toFixed(1)}GB</span>
               </div>
               <p className="catalog-description">
                 {entry.description}
@@ -130,9 +197,7 @@ function Catalog({ installedModels, onClose, onModelsChanged }: Props) {
                 )}
               </p>
               <div className="settings-row-controls">
-                {installed ? (
-                  <span className="catalog-installed">✓ 選択候補に表示されます</span>
-                ) : pull && !pull.done ? (
+                {pull && !pull.done ? (
                   <span className="catalog-progress">
                     {pull.status}
                     {pct != null ? ` ${pct}%` : ""}
