@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   ChatMessage,
   ChatStreamEvent,
+  EngineVersion,
+  HardwareProfile,
   ModelInfo,
   ModelTarget,
   ProviderInfo,
@@ -14,10 +16,29 @@ import Catalog from "./Catalog";
 import "./App.css";
 
 type OllamaStatus = "checking" | "connected" | "unreachable";
-type ReplyStatus = "streaming" | "done" | "error" | "skipped";
+type ReplyStatus = "queued" | "streaming" | "done" | "error" | "skipped" | "cancelled";
 
 const ONLINE_PROVIDER_IDS = new Set(["anthropic", "openai", "gemini", "xai"]);
 const PARENT_MODEL_STORAGE_KEY = "localAgentsOps.parentModel";
+const SERIALIZE_LOCAL_STORAGE_KEY = "localAgentsOps.serializeLocal";
+
+/** Mirrors the Rust catalog's estimates so the UI can warn before a
+ * selection is sent, rather than after Ollama starts thrashing:
+ * loaded weights need meaningfully more RAM than the on-disk size, and
+ * the OS plus this app need headroom of their own. */
+const RUNTIME_OVERHEAD_MULTIPLIER = 1.6;
+const RAM_BUDGET_FRACTION = 0.7;
+
+/** Exchanges of a model's own history to resend each turn.
+ *
+ * Prompt processing is compute-bound rather than bandwidth-bound, so on a
+ * machine without a GPU it costs tens of seconds per thousand tokens -- an
+ * uncapped transcript makes every turn slower than the last before the model
+ * has generated anything. Applied to online targets too, both to bound paid
+ * tokens and to keep the comparison fair: models answering the same question
+ * from different amounts of context aren't comparable. Mirrors the bound the
+ * router already puts on the history it forwards. */
+const MAX_HISTORY_EXCHANGES = 6;
 
 interface ModelReply {
   target: ModelTarget;
@@ -36,17 +57,68 @@ interface Turn {
   replies: ModelReply[];
 }
 
+/** The user's side of the conversation, which is the same whichever model
+ * answered. What the router needs to judge relevance, without inheriting one
+ * provider's answers as if they were everyone's. */
+function userTurnsOnly(turns: Turn[], maxTurns: number): ChatMessage[] {
+  return turns.slice(-maxTurns).map((turn) => ({ role: "user", content: turn.userText }));
+}
+
+/** Header text for each reply state. `queued` in particular has to explain
+ * itself -- a panel sitting there with no label reads as broken rather than as
+ * waiting for its turn. */
+function replyStatusLabel(status: ReplyStatus, stillThinking: boolean): string {
+  switch (status) {
+    case "queued":
+      return "待機中（メモリ空き待ち）";
+    case "streaming":
+      return stillThinking ? "思考中…" : "生成中…";
+    case "cancelled":
+      return "中断しました";
+    case "error":
+      return "エラー";
+    case "done":
+      return "完了";
+    default:
+      return status;
+  }
+}
+
+/** Smallest installed model by on-disk size. Used both for the router role
+ * and for the initial selection: with no GPU, generation speed is bounded by
+ * model size over memory bandwidth, so the smallest model is the only one
+ * guaranteed to feel responsive before the user has picked anything. */
+function smallestModel(models: ModelInfo[]): ModelInfo | undefined {
+  return [...models].sort((a, b) => (a.size_bytes ?? 0) - (b.size_bytes ?? 0))[0];
+}
+
 /** Each model gets its own conversation thread: its own past answers only,
- * not what the other models in a parallel-comparison turn said. */
-function buildHistoryForTarget(turns: Turn[], targetId: string): ChatMessage[] {
-  const history: ChatMessage[] = [];
+ * not what the other models in a parallel-comparison turn said.
+ *
+ * Replays `sentContent` in place of the raw user text when the router
+ * rewrote that turn -- the target's own prior answer was to whatever it
+ * actually received, so resending the original would show it a "user" turn
+ * that doesn't match what it already replied to.
+ *
+ * `maxExchanges` bounds how far back that thread reaches, so the prompt --
+ * and with it the per-turn prefill cost -- stops growing without limit.
+ * Replies that never produced text (skipped, cancelled, failed) are left out
+ * rather than sent as empty assistant turns. */
+function buildHistoryForTarget(
+  turns: Turn[],
+  targetId: string,
+  maxExchanges = Infinity,
+): ChatMessage[] {
+  const exchanges: ChatMessage[][] = [];
   for (const turn of turns) {
     const reply = turn.replies.find((r) => r.target.id === targetId);
-    if (!reply) continue;
-    history.push({ role: "user", content: reply.sentContent ?? turn.userText });
-    history.push({ role: "assistant", content: reply.content });
+    if (!reply || !reply.content) continue;
+    exchanges.push([
+      { role: "user", content: reply.sentContent ?? turn.userText },
+      { role: "assistant", content: reply.content },
+    ]);
   }
-  return history;
+  return exchanges.slice(-maxExchanges).flat();
 }
 
 function App() {
@@ -61,6 +133,15 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [unloadingModels, setUnloadingModels] = useState<Set<string>>(new Set());
+  /** Models the user has explicitly unloaded, hidden from the comparison strip
+   * until the next model list refresh. Ejecting is a statement that the model is
+   * done for now, and leaving its chip up invites a click that quietly reloads
+   * several GB.
+   *
+   * Kept separate from `models`, which means *installed*: dropping it from there
+   * would have the catalog offer to download something already on disk, and
+   * remove it from the parent-model choices in settings. */
+  const [ejectedModels, setEjectedModels] = useState<Set<string>>(new Set());
   const [parentModel, setParentModel] = useState(() => {
     try {
       return localStorage.getItem(PARENT_MODEL_STORAGE_KEY) ?? "";
@@ -69,7 +150,34 @@ function App() {
     }
   });
   const [routing, setRouting] = useState(false);
+  /** What the routing step decided, when it's something the user should know
+   * about: nothing was sent, or money was spent on a fallback. */
+  const [routingNotice, setRoutingNotice] = useState<string | null>(null);
+  const [hardware, setHardware] = useState<HardwareProfile | null>(null);
+  const [engineVersion, setEngineVersion] = useState<EngineVersion | null>(null);
+  const [serializeLocal, setSerializeLocal] = useState(() => {
+    try {
+      return localStorage.getItem(SERIALIZE_LOCAL_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
   const isComposingRef = useRef(false);
+
+  /** The backend owns the actual behaviour, so push the preference through on
+   * every change and once at startup -- a value restored from localStorage that
+   * the backend never heard about would be a lie in the settings panel. */
+  function updateSerializeLocal(serialize: boolean) {
+    setSerializeLocal(serialize);
+    try {
+      localStorage.setItem(SERIALIZE_LOCAL_STORAGE_KEY, String(serialize));
+    } catch {
+      // Persistence is a nice-to-have; the in-session setting still applies.
+    }
+    invoke("set_serialize_local", { serialize }).catch((err) => {
+      console.error("failed to apply the serialize setting:", err);
+    });
+  }
 
   function updateParentModel(model: string) {
     setParentModel(model);
@@ -81,18 +189,23 @@ function App() {
     }
   }
 
+  // Queued counts as in-flight: the request is accepted and holding a place in
+  // the RAM budget, it just hasn't started generating yet.
   const isStreaming =
-    turns.length > 0 && turns[turns.length - 1].replies.some((r) => r.status === "streaming");
+    turns.length > 0 &&
+    turns[turns.length - 1].replies.some((r) => r.status === "streaming" || r.status === "queued");
 
   const localTargets: ModelTarget[] = useMemo(
     () =>
-      models.map((m) => ({
-        id: `ollama:${m.name}`,
-        provider: "ollama",
-        model: m.name,
-        label: m.name,
-      })),
-    [models],
+      models
+        .filter((m) => !ejectedModels.has(m.name))
+        .map((m) => ({
+          id: `ollama:${m.name}`,
+          provider: "ollama",
+          model: m.name,
+          label: m.name,
+        })),
+    [models, ejectedModels],
   );
 
   const onlineTargets: ModelTarget[] = useMemo(
@@ -108,16 +221,74 @@ function App() {
     [providers],
   );
 
+  // Both modifiers work everywhere; the label just follows the local habit.
+  const sendShortcutLabel = hardware?.os === "macos" ? "⌘+Enter" : "Ctrl+Enter";
+
   const availableTargets = onlineMode ? [...localTargets, ...onlineTargets] : localTargets;
   const targetsById = useMemo(() => {
     const map = new Map<string, ModelTarget>();
     for (const t of availableTargets) map.set(t.id, t);
     return map;
   }, [availableTargets]);
-  const selectedTargets = useMemo(
+
+  /** Selected chips first, so the strip reflects what the next send will use
+   * rather than whatever order Ollama happens to list models in.
+   *
+   * A stable partition: the underlying order still shows through inside each
+   * group. Note that chips do move as you toggle them -- that's the point of
+   * ordering by selection, but it means a rapid series of clicks lands on
+   * targets that have shifted under the cursor. */
+  const orderedTargets = useMemo(() => {
+    const selected = new Set(selectedIds);
+    return [
+      ...availableTargets.filter((t) => selected.has(t.id)),
+      ...availableTargets.filter((t) => !selected.has(t.id)),
+    ];
+  }, [availableTargets, selectedIds]);
+
+  /** The selections that still resolve to something sendable.
+   *
+   * `selectedIds` can outlive what it points at: turning off online mode, or a
+   * model list refresh, leaves ids behind that `handleSend` silently drops.
+   * Everything user-facing counts these instead, so the send button can't
+   * promise more requests than it will make. */
+  const sendableTargets = useMemo(
     () => selectedIds.map((id) => targetsById.get(id)).filter((t): t is ModelTarget => !!t),
     [selectedIds, targetsById],
   );
+
+  /** What the current selection would cost in RAM if Ollama held every one of
+   * those models at once, measured against the same budget the Rust catalog
+   * uses. Ollama accepts the requests either way and only then starts
+   * evicting and reloading, so the warning has to come from here. */
+  const memoryPressure = useMemo(() => {
+    if (!hardware) return null;
+    let onDiskGb = 0;
+    let count = 0;
+    for (const target of sendableTargets) {
+      if (target.provider !== "ollama") continue;
+      onDiskGb += (models.find((m) => m.name === target.model)?.size_bytes ?? 0) / 1024 ** 3;
+      count += 1;
+    }
+    const residentGb = onDiskGb * RUNTIME_OVERHEAD_MULTIPLIER;
+    const budgetGb = hardware.total_ram_gb * RAM_BUDGET_FRACTION;
+    return { count, residentGb, budgetGb, overBudget: residentGb > budgetGb };
+  }, [sendableTargets, models, hardware]);
+
+  /** Selected local models that can't think, so 「じっくり」 can say what it
+   * will and won't change instead of looking like it applies to everything. */
+  const thinkUnsupported = useMemo(
+    () =>
+      sendableTargets
+        .filter((t) => t.provider === "ollama")
+        .filter((t) => models.find((m) => m.name === t.model)?.supports_thinking === false)
+        .map((t) => t.label),
+    [sendableTargets, models],
+  );
+
+  function refreshEngineVersion() {
+    invoke<EngineVersion>("ollama_version").then(setEngineVersion).catch(() => {});
+  }
 
   function refreshProviders() {
     invoke<ProviderInfo[]>("list_providers").then(setProviders).catch(() => {});
@@ -128,11 +299,15 @@ function App() {
       .then((list) => {
         setModels(list);
         setStatus("connected");
-        setSelectedIds((prev) => {
-          const known = new Set(prev);
-          const additions = list.map((m) => `ollama:${m.name}`).filter((id) => !known.has(id));
-          return [...prev, ...additions];
-        });
+        // Drop selections whose model is gone, but deliberately don't select
+        // freshly pulled ones: a model just downloaded from the catalog is
+        // usually the largest thing on the machine, and silently adding it to
+        // the comparison set is how you end up loading several GB by accident.
+        const available = new Set(list.map((m) => `ollama:${m.name}`));
+        setSelectedIds((prev) => prev.filter((id) => !id.startsWith("ollama:") || available.has(id)));
+        // An explicit refresh is the user asking to see the installed set again,
+        // so previously ejected models come back onto the strip.
+        setEjectedModels(new Set());
       })
       .catch(() => setStatus("unreachable"));
   }
@@ -142,10 +317,21 @@ function App() {
       .then((list) => {
         setModels(list);
         setStatus("connected");
-        setSelectedIds(list.map((m) => `ollama:${m.name}`));
+        // Start with a single model rather than every installed one. Models
+        // running in parallel share one memory bus, so on a machine without a
+        // GPU an all-models default makes the first turn as slow as it can be.
+        const smallest = smallestModel(list);
+        setSelectedIds(smallest ? [`ollama:${smallest.name}`] : []);
       })
       .catch(() => setStatus("unreachable"));
     refreshProviders();
+    invoke<HardwareProfile>("detect_hardware").then(setHardware).catch(() => {});
+    refreshEngineVersion();
+    // Re-apply the restored preference, which the backend starts without.
+    if (serializeLocal) {
+      invoke("set_serialize_local", { serialize: true }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Default the parent (router) model to the smallest installed one, so
@@ -175,19 +361,31 @@ function App() {
     const unlisten = listen<ChatStreamEvent>("chat-stream", (event) => {
       const payload = event.payload;
 
-      if (payload.type === "thinking") {
+      if (payload.type === "queued") {
+        updateReplyByRequestId(payload.request_id, (r) => ({ ...r, status: "queued" }));
+      } else if (payload.type === "thinking") {
         updateReplyByRequestId(payload.request_id, (r) => ({
           ...r,
+          status: "streaming",
           thinking: (r.thinking ?? "") + payload.content,
         }));
       } else if (payload.type === "token") {
-        updateReplyByRequestId(payload.request_id, (r) => ({ ...r, content: r.content + payload.content }));
+        updateReplyByRequestId(payload.request_id, (r) => ({
+          ...r,
+          status: "streaming",
+          content: r.content + payload.content,
+        }));
+      } else if (payload.type === "cancelled") {
+        updateReplyByRequestId(payload.request_id, (r) => ({ ...r, status: "cancelled" }));
       } else if (payload.type === "done") {
-        updateReplyByRequestId(payload.request_id, (r) =>
-          !r.content && r.thinking
+        updateReplyByRequestId(payload.request_id, (r) => {
+          // A cancelled request can still see a trailing Done from the
+          // stream it was reading; don't relabel a stop as a completion.
+          if (r.status === "cancelled") return r;
+          return !r.content && r.thinking
             ? { ...r, status: "done", content: "（思考の途中で応答が終了しました。もう一度お試しください）" }
-            : { ...r, status: "done" },
-        );
+            : { ...r, status: "done" };
+        });
       } else if (payload.type === "error") {
         updateReplyByRequestId(payload.request_id, (r) => ({
           ...r,
@@ -211,6 +409,10 @@ function App() {
     setUnloadingModels((prev) => new Set(prev).add(model));
     try {
       await invoke("unload_model", { model });
+      // Only hide it once the unload actually succeeded -- a chip that vanished
+      // while the model was still resident would misreport the machine's state.
+      setEjectedModels((prev) => new Set(prev).add(model));
+      setSelectedIds((prev) => prev.filter((id) => id !== `ollama:${model}`));
     } catch (err) {
       console.error(`failed to unload ${model}:`, err);
     } finally {
@@ -219,6 +421,22 @@ function App() {
         next.delete(model);
         return next;
       });
+    }
+  }
+
+  function handleCancel(requestId: string) {
+    invoke("cancel_chat", { requestId }).catch((err) => {
+      console.error("cancel failed:", err);
+    });
+  }
+
+  function handleCancelAll() {
+    const current = turns[turns.length - 1];
+    if (!current) return;
+    for (const reply of current.replies) {
+      if (reply.status === "streaming" || reply.status === "queued") {
+        handleCancel(reply.requestId);
+      }
     }
   }
 
@@ -240,7 +458,7 @@ function App() {
 
   async function handleSend() {
     const text = input.trim();
-    const targets = selectedTargets;
+    const targets = sendableTargets;
     if (!text || targets.length === 0 || isStreaming) return;
 
     const priorTurns = turns;
@@ -257,6 +475,7 @@ function App() {
 
     setTurns((prev) => [...prev, { id: crypto.randomUUID(), userText: text, replies }]);
     setInput("");
+    setRoutingNotice(null);
 
     // Local models always get their own full history, sent immediately --
     // the parent-model routing/compression step is about protecting paid
@@ -265,7 +484,7 @@ function App() {
       const reply = replyByTargetId.get(target.id);
       if (!reply) continue;
       const outgoing: ChatMessage[] = [
-        ...buildHistoryForTarget(priorTurns, target.id),
+        ...buildHistoryForTarget(priorTurns, target.id, MAX_HISTORY_EXCHANGES),
         { role: "user", content: text },
       ];
       sendToTarget(reply, outgoing);
@@ -273,50 +492,73 @@ function App() {
 
     if (onlineSelected.length === 0) return;
 
-    const sendOnlineDirect = (target: ModelTarget) => {
+    /** Sends `message` to one online target on top of that target's own thread.
+     * The history has to come from the target itself: each provider answered
+     * the earlier turns differently, and handing one provider another's replies
+     * would make it continue a conversation it never had. */
+    const sendOnline = (target: ModelTarget, message: string) => {
       const reply = replyByTargetId.get(target.id);
       if (!reply) return;
-      const outgoing: ChatMessage[] = [
-        ...buildHistoryForTarget(priorTurns, target.id),
-        { role: "user", content: text },
-      ];
-      sendToTarget(reply, outgoing);
+      sendToTarget(reply, [
+        ...buildHistoryForTarget(priorTurns, target.id, MAX_HISTORY_EXCHANGES),
+        { role: "user", content: message },
+      ]);
+    };
+
+    const sendOnlineDirect = () => {
+      for (const target of onlineSelected) sendOnline(target, text);
     };
 
     if (!parentModel) {
-      for (const target of onlineSelected) sendOnlineDirect(target);
+      sendOnlineDirect();
       return;
     }
 
     setRouting(true);
     try {
-      await Promise.all(
-        onlineSelected.map(async (target) => {
-          const reply = replyByTargetId.get(target.id);
-          if (!reply) return;
+      // The user's own turns only. They're identical for every provider, so the
+      // routing decision doesn't depend on which provider happens to be first
+      // in the selection -- and each provider's own replies reach it directly
+      // through `sendOnline` anyway.
+      const decision = await invoke<RouterDecision>("route_and_compress", {
+        parentModel,
+        candidateProviders: onlineSelected.map((t) => t.provider),
+        history: userTurnsOnly(priorTurns, MAX_HISTORY_EXCHANGES),
+        newMessage: text,
+      });
 
-          try {
-            const decision = await invoke<RouterDecision>("route_and_compress", {
-              parentModel,
-              candidateProviders: [target.provider],
-              history: buildHistoryForTarget(priorTurns, target.id),
-              newMessage: text,
-            });
+      if (decision.providers.length === 0) {
+        setRoutingNotice(
+          "🧠 親モデルが、今回はどのオンラインサービスも呼び出す価値がないと判断しました。送信していません。",
+        );
+      }
 
-            if (decision.providers.includes(target.provider)) {
-              updateReplyByRequestId(reply.requestId, (r) => ({ ...r, sentContent: decision.compressed_prompt }));
-              sendToTarget(reply, [{ role: "user", content: decision.compressed_prompt }]);
-            } else {
-              updateReplyByRequestId(reply.requestId, (r) => ({ ...r, status: "skipped" }));
-            }
-          } catch (err) {
-            console.error(`routing failed for ${target.id}, falling back to a direct send:`, err);
-            sendOnlineDirect(target);
+      for (const target of onlineSelected) {
+        const reply = replyByTargetId.get(target.id);
+        if (!reply) continue;
+        if (decision.providers.includes(target.provider)) {
+          // Only claim the parent model rewrote something when it actually
+          // ran, and when the wording actually changed.
+          if (!decision.shortcut && decision.compressed_prompt !== text) {
+            updateReplyByRequestId(reply.requestId, (r) => ({
+              ...r,
+              sentContent: decision.compressed_prompt,
+            }));
           }
-        }),
-      );
+          sendOnline(target, decision.compressed_prompt);
+        } else {
+          updateReplyByRequestId(reply.requestId, (r) => ({ ...r, status: "skipped" }));
+        }
+      }
     } catch (err) {
-      console.error("routing failed unexpectedly:", err);
+      // The user did pick these providers, so honouring the selection is the
+      // right fallback -- but it spends money, so say so rather than only
+      // logging it to a console nobody has open.
+      console.error("routing failed, falling back to a direct send:", err);
+      setRoutingNotice(
+        `⚠️ 親モデルによる最適化に失敗したため、選択した${onlineSelected.length}サービスへそのまま送信しました（${String(err)}）`,
+      );
+      sendOnlineDirect();
     } finally {
       setRouting(false);
     }
@@ -329,7 +571,9 @@ function App() {
         {status === "checking" && <span className="status status-checking">Ollama: 確認中…</span>}
         {status === "unreachable" && (
           <span className="status status-error">
-            Ollama未接続 — ターミナルで `ollama serve` を実行してください
+            {hardware?.os === "windows"
+              ? "Ollama未接続 — Ollamaを起動してください（タスクトレイに常駐します）"
+              : "Ollama未接続 — ターミナルで `ollama serve` を実行してください"}
           </span>
         )}
         {status === "connected" && (
@@ -363,7 +607,7 @@ function App() {
               </button>
             </div>
             <div className="model-select" role="group" aria-label="比較するモデル">
-              {availableTargets.map((t) => (
+              {orderedTargets.map((t) => (
                 <div key={t.id} className="model-chip">
                   <button
                     className={selectedIds.includes(t.id) ? "active" : ""}
@@ -406,9 +650,35 @@ function App() {
           ⚙️で親モデルを設定すると、送信前に内容を最適化して不要なサービスへの送信を減らせます
         </div>
       )}
+      {engineVersion && !engineVersion.supported && (
+        <div className="online-hint">
+          ⚠️ Ollama {engineVersion.version} は古すぎます（必要: {engineVersion.minimum} 以上）。
+          じっくりモードとモデルごとの対応判定が正しく動きません。⚙️から更新してください。
+        </div>
+      )}
+      {engineVersion?.supported && engineVersion.update_available && (
+        <div className="online-hint">
+          Ollama {engineVersion.latest} が利用できます（現在 {engineVersion.version}）。⚙️から更新できます。
+        </div>
+      )}
+      {thinkMode && thinkUnsupported.length > 0 && (
+        <div className="online-hint">
+          🧠 じっくりモードに対応していないモデルがあります（{thinkUnsupported.join(", ")}）。
+          これらは通常の応答になります。
+        </div>
+      )}
+      {memoryPressure?.overBudget && (
+        <div className="online-hint">
+          ⚠️ 選択中の{memoryPressure.count}モデルを同時に読み込むと約
+          {memoryPressure.residentGb.toFixed(1)}GB必要で、この端末の予算
+          {memoryPressure.budgetGb.toFixed(1)}GBを超えます。並列実行はメモリ帯域も分割するため、
+          モデルを減らしたほうが速く終わります。
+        </div>
+      )}
       {routing && (
         <div className="online-hint routing-hint">🧠 親モデルが送信内容を最適化中…</div>
       )}
+      {routingNotice && <div className="online-hint routing-hint">{routingNotice}</div>}
 
       <main className="turns">
         {turns.length === 0 && (
@@ -425,7 +695,8 @@ function App() {
             <div className="reply-row">
               {turn.replies.map((r) => {
                 const stillThinking = r.status === "streaming" && !r.content && !!r.thinking;
-                const waiting = r.status === "streaming" && !r.content && !r.thinking;
+                const inFlight = r.status === "streaming" || r.status === "queued";
+                const waiting = inFlight && !r.content && !r.thinking;
                 if (r.status === "skipped") {
                   return (
                     <div key={r.requestId} className="reply-panel reply-skipped">
@@ -444,8 +715,17 @@ function App() {
                     <div className="reply-header">
                       <span className="reply-model">{r.target.label}</span>
                       <span className={`reply-status reply-status-${r.status}`}>
-                        {r.status === "streaming" ? (stillThinking ? "思考中…" : "生成中…") : r.status}
+                        {replyStatusLabel(r.status, stillThinking)}
                       </span>
+                      {inFlight && (
+                        <button
+                          className="unload-button"
+                          onClick={() => handleCancel(r.requestId)}
+                          title="このモデルの生成を中断"
+                        >
+                          ⏹
+                        </button>
+                      )}
                     </div>
                     {r.sentContent && (
                       <details className="message-thinking">
@@ -479,33 +759,58 @@ function App() {
             isComposingRef.current = false;
           }}
           onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.shiftKey) return;
-            // IME conversion-confirm also fires an Enter keydown. Guard with
-            // all three signals -- WebKit (Tauri's macOS webview) doesn't
-            // reliably mark that keydown as isComposing, so the ref from
-            // compositionstart/end and the legacy keyCode 229 check both
-            // matter, not just nativeEvent.isComposing.
+            // Ctrl+Enter sends (Cmd+Enter too, for the macOS habit); plain Enter
+            // inserts a newline.
+            //
+            // Enter-to-send cannot be made safe alongside an IME: the keypress
+            // that confirms a conversion is the same keypress that would submit.
+            // Guarding on isComposing, the legacy keyCode 229, a
+            // compositionstart/end ref and a grace window after compositionend
+            // still let it through -- on Windows compositionend can land before
+            // the confirming keydown, at which point every one of those signals
+            // reads "not composing" and the keypress is indistinguishable from a
+            // deliberate Enter. Moving the shortcut is the only real fix.
+            if (e.key !== "Enter") return;
+            if (!e.ctrlKey && !e.metaKey) return;
+            // Still not mid-conversion, in case an IME maps this combination.
             if (isComposingRef.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
             e.preventDefault();
             handleSend();
           }}
-          placeholder="プロンプトを入力 (Enterで送信 / Shift+Enterで改行)"
+          placeholder={`プロンプトを入力 (${sendShortcutLabel}で送信 / Enterで改行)`}
           disabled={status !== "connected" || isStreaming}
         />
-        <button
-          onClick={handleSend}
-          disabled={status !== "connected" || isStreaming || !input.trim() || selectedTargets.length === 0}
-        >
-          {isStreaming ? "生成中…" : `送信 (${selectedTargets.length})`}
-        </button>
+        {isStreaming ? (
+          <button onClick={handleCancelAll} title="生成を中断してマシンを解放">
+            ⏹ 中断
+          </button>
+        ) : (
+          <button
+            onClick={handleSend}
+            disabled={status !== "connected" || !input.trim() || sendableTargets.length === 0}
+            title={`${sendShortcutLabel}でも送信できます`}
+          >
+            送信 ({sendableTargets.length})
+          </button>
+        )}
       </footer>
 
       {settingsOpen && (
         <Settings
           providers={providers}
           models={models}
+          engine={engineVersion}
+          onEngineUpdated={() => {
+            // The engine restarts, so both the version and what it has loaded
+            // are stale.
+            refreshEngineVersion();
+            refreshModels();
+          }}
+          hardware={hardware}
           parentModel={parentModel}
           onParentModelChange={updateParentModel}
+          serializeLocal={serializeLocal}
+          onSerializeLocalChange={updateSerializeLocal}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshProviders}
         />

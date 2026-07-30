@@ -24,6 +24,9 @@ impl InferenceBackend for GeminiBackend {
             size_bytes: None,
             parameter_size: None,
             quantization: None,
+            // `chat_stream` here ignores ChatOptions, so 「じっくり」 changes
+            // nothing for this backend regardless of what the model can do.
+            supports_thinking: false,
         }])
     }
 
@@ -38,7 +41,7 @@ impl InferenceBackend for GeminiBackend {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
         );
-        let client = reqwest::Client::new();
+        let client = super::http_client();
 
         let system_text = messages
             .iter()
