@@ -38,10 +38,26 @@ pub enum PackageManager {
 }
 
 impl PackageManager {
-    fn program(self) -> &'static str {
+    /// Resolves to whatever this process can actually execute.
+    ///
+    /// `winget` is a Windows "app execution alias" that resolves through this
+    /// process's PATH regardless of how it was launched. Homebrew doesn't get
+    /// the same treatment: a GUI app launched from Finder or `open` (as
+    /// opposed to a terminal) inherits only the OS's minimal default PATH
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`), which never includes `brew` no
+    /// matter where it's installed. Check the well-known install locations
+    /// directly for Homebrew rather than trust PATH to have it.
+    fn program(self) -> String {
         match self {
-            PackageManager::Winget => "winget",
-            PackageManager::Homebrew => "brew",
+            PackageManager::Winget => "winget".to_string(),
+            PackageManager::Homebrew => {
+                const KNOWN_PATHS: [&str; 2] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
+                KNOWN_PATHS
+                    .into_iter()
+                    .find(|path| std::path::Path::new(path).exists())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "brew".to_string())
+            }
         }
     }
 
