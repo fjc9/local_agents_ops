@@ -399,7 +399,9 @@ pub async fn detect_hardware(state: State<'_, AppState>) -> Result<HardwareProfi
 pub async fn recommend_models(state: State<'_, AppState>) -> Result<Vec<CatalogEntry>, String> {
     let accelerated = state.ollama.gpu_offload_detected().await;
     let profile = catalog::detect_hardware(accelerated, state.ollama.observed_gb_per_sec());
-    Ok(catalog::recommend(&profile, 10))
+    // Raised past the count of entries this reference machine can actually run,
+    // so a usable model can't be cut off by the limit rather than by the gates.
+    Ok(catalog::recommend(&profile, 12))
 }
 
 /// Streams `ollama pull` progress as `pull-progress` events. Returns once
