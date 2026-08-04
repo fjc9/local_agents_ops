@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{
-    ChatMessage, ChatOptions, ChatStreamEvent, EngineError, InferenceBackend, ModelInfo,
+    ChatMessage, ChatOptions, ChatStreamEvent, EngineError, GenerationParams, InferenceBackend,
+    ModelInfo,
     PullProgressEvent,
 };
 
@@ -431,6 +432,10 @@ struct ChatRequest<'a> {
     /// catalog (gemma3, llama3.x, phi4, mistral) is non-thinking.
     #[serde(skip_serializing_if = "Option::is_none")]
     think: Option<bool>,
+    /// The user's sampling settings for this model, omitted when they haven't
+    /// touched any so the model's own Modelfile defaults stand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<&'a GenerationParams>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -521,6 +526,7 @@ impl InferenceBackend for OllamaBackend {
             messages,
             stream: true,
             think,
+            options: (!options.params.is_empty()).then_some(&options.params),
         };
 
         let resp = self
@@ -615,6 +621,103 @@ mod tests {
     use super::*;
     use crate::engines::ChatRole;
 
+    fn user_message() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            role: ChatRole::User,
+            content: "こんにちは".to_string(),
+        }]
+    }
+
+    fn request_json(params: &GenerationParams) -> serde_json::Value {
+        let messages = user_message();
+        serde_json::to_value(ChatRequest {
+            model: "llama3.2:3b",
+            messages: &messages,
+            stream: true,
+            think: None,
+            options: (!params.is_empty()).then_some(params),
+        })
+        .expect("serialise")
+    }
+
+    /// An untouched panel must not send an `options` object at all.
+    ///
+    /// Sending `{}` would look harmless, but each knob the app names is a knob
+    /// the model's own Modelfile no longer gets to set -- and this app's whole
+    /// point is comparing models as they actually ship.
+    #[test]
+    fn untouched_settings_leave_options_out_of_the_request() {
+        let body = request_json(&GenerationParams::default());
+        assert!(
+            body.get("options").is_none(),
+            "expected no options key, got {body}"
+        );
+    }
+
+    /// One knob set means one key sent -- the other eight stay absent rather
+    /// than going out as zeros, which for `temperature` or `top_p` would be a
+    /// completely different model than the user asked for.
+    #[test]
+    fn only_the_knobs_the_user_set_are_sent() {
+        let body = request_json(&GenerationParams {
+            temperature: Some(0.2),
+            ..Default::default()
+        });
+        let options = body.get("options").expect("options present");
+        assert_eq!(options["temperature"], 0.2);
+        assert_eq!(
+            options.as_object().map(|o| o.len()),
+            Some(1),
+            "expected temperature alone, got {options}"
+        );
+    }
+
+    /// The names have to match Ollama's `options` vocabulary exactly: a typo
+    /// here is silent, since Ollama ignores keys it doesn't recognise and the
+    /// answer still streams back looking fine.
+    #[test]
+    fn every_knob_serialises_under_its_ollama_name() {
+        let body = request_json(&GenerationParams {
+            num_ctx: Some(8192),
+            temperature: Some(0.7),
+            top_k: Some(30),
+            top_p: Some(0.85),
+            min_p: Some(0.05),
+            repeat_last_n: Some(-1),
+            repeat_penalty: Some(1.15),
+            presence_penalty: Some(0.5),
+            frequency_penalty: Some(-0.25),
+        });
+        let options = body.get("options").expect("options present");
+
+        assert_eq!(options["num_ctx"], 8192);
+        assert_eq!(options["temperature"], 0.7);
+        assert_eq!(options["top_k"], 30);
+        assert_eq!(options["top_p"], 0.85);
+        assert_eq!(options["min_p"], 0.05);
+        // -1 means "the whole context"; a knob typed as unsigned would have
+        // rejected the user's input long before it got here.
+        assert_eq!(options["repeat_last_n"], -1);
+        assert_eq!(options["repeat_penalty"], 1.15);
+        assert_eq!(options["presence_penalty"], 0.5);
+        assert_eq!(options["frequency_penalty"], -0.25);
+        assert_eq!(options.as_object().map(|o| o.len()), Some(9));
+    }
+
+    /// A zero is a real, meaningful setting for several of these knobs
+    /// (`top_k: 0` disables the cutoff, `repeat_last_n: 0` the repeat check),
+    /// so it has to survive the "is anything set?" check rather than looking
+    /// like an unset field.
+    #[test]
+    fn an_explicit_zero_counts_as_a_setting() {
+        let params = GenerationParams {
+            top_k: Some(0),
+            ..Default::default()
+        };
+        assert!(!params.is_empty());
+        assert_eq!(request_json(&params)["options"]["top_k"], 0);
+    }
+
     /// These talk to a real Ollama, so they're ignored by default. Setup:
     ///   ollama serve
     ///   ollama pull llama3.2:3b
@@ -664,7 +767,7 @@ mod tests {
                     role: ChatRole::User,
                     content: "2+2は?".to_string(),
                 }],
-                ChatOptions { think: true },
+                ChatOptions { think: true, ..Default::default() },
                 tx,
             )
             .await
@@ -694,7 +797,7 @@ mod tests {
                     role: ChatRole::User,
                     content: "Write a paragraph about the sea.".to_string(),
                 }],
-                ChatOptions { think: false },
+                ChatOptions { think: false, ..Default::default() },
                 tx,
             )
             .await
@@ -765,7 +868,7 @@ mod tests {
                     role: ChatRole::User,
                     content: "Say OK".to_string(),
                 }],
-                ChatOptions { think: true },
+                ChatOptions { think: true, ..Default::default() },
                 tx,
             )
             .await

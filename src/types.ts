@@ -5,6 +5,21 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Per-model sampling settings. Field names match Ollama's `options` keys,
+ * which is what the backend forwards them as. Every key is optional: an absent
+ * one means "leave the engine on its own default" rather than zero. */
+export interface GenerationParams {
+  num_ctx?: number;
+  temperature?: number;
+  top_k?: number;
+  top_p?: number;
+  min_p?: number;
+  repeat_last_n?: number;
+  repeat_penalty?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+}
+
 export interface ModelInfo {
   name: string;
   size_bytes: number | null;

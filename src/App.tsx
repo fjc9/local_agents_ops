@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   ChatStreamEvent,
   EngineVersion,
+  GenerationParams,
   HardwareProfile,
   ModelInfo,
   ModelTarget,
@@ -22,6 +23,7 @@ const ONLINE_PROVIDER_IDS = new Set(["anthropic", "openai", "gemini", "xai"]);
 const PARENT_MODEL_STORAGE_KEY = "localAgentsOps.parentModel";
 const SERIALIZE_LOCAL_STORAGE_KEY = "localAgentsOps.serializeLocal";
 const DISABLED_MODELS_STORAGE_KEY = "localAgentsOps.disabledModels";
+const MODEL_PARAMS_STORAGE_KEY = "localAgentsOps.modelParams";
 
 /** Mirrors the Rust catalog's estimates so the UI can warn before a
  * selection is sent, rather than after Ollama starts thrashing:
@@ -169,6 +171,21 @@ function App() {
       return "";
     }
   });
+
+  /** Sampling settings per model name, as edited in the settings panel.
+   *
+   * Keyed by name rather than held on `ModelInfo` so a model that's
+   * temporarily missing -- Ollama down, model uninstalled and reinstalled --
+   * doesn't lose what the user tuned. Only the keys they actually touched are
+   * stored; anything absent stays on the engine's own default. */
+  const [modelParams, setModelParams] = useState<Record<string, GenerationParams>>(() => {
+    try {
+      const stored = localStorage.getItem(MODEL_PARAMS_STORAGE_KEY);
+      return stored ? JSON.parse(stored) : {};
+    } catch {
+      return {};
+    }
+  });
   const [routing, setRouting] = useState(false);
   /** What the routing step decided, when it's something the user should know
    * about: nothing was sent, or money was spent on a fallback. */
@@ -211,6 +228,26 @@ function App() {
       }
       try {
         localStorage.setItem(DISABLED_MODELS_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        // Persistence is a nice-to-have; the setting still applies this session.
+      }
+      return next;
+    });
+  }
+
+  /** Stores one model's knobs, dropping the entry entirely once nothing is
+   * overridden so `localStorage` doesn't accumulate empty objects for every
+   * model the user ever opened in the panel. */
+  function updateModelParams(model: string, params: GenerationParams) {
+    setModelParams((prev) => {
+      const next = { ...prev };
+      if (Object.keys(params).length === 0) {
+        delete next[model];
+      } else {
+        next[model] = params;
+      }
+      try {
+        localStorage.setItem(MODEL_PARAMS_STORAGE_KEY, JSON.stringify(next));
       } catch {
         // Persistence is a nice-to-have; the setting still applies this session.
       }
@@ -486,6 +523,10 @@ function App() {
       model: reply.target.model,
       messages,
       think: thinkMode,
+      // Local models only. The paid APIs each accept a different subset, and
+      // silently applying part of the settings to some targets would make a
+      // side-by-side comparison misrepresent what was compared.
+      params: reply.target.provider === "ollama" ? modelParams[reply.target.model] : undefined,
     }).catch((err) => {
       updateReplyByRequestId(reply.requestId, (r) => ({
         ...r,
@@ -850,6 +891,8 @@ function App() {
           onParentModelChange={updateParentModel}
           serializeLocal={serializeLocal}
           onSerializeLocalChange={updateSerializeLocal}
+          modelParams={modelParams}
+          onModelParamsChange={updateModelParams}
           onClose={() => setSettingsOpen(false)}
           onChanged={refreshProviders}
         />

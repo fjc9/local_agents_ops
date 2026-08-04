@@ -1,7 +1,19 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import EngineUpdate from "./EngineUpdate";
-import type { EngineVersion, HardwareProfile, ModelInfo, ProviderInfo } from "./types";
+import {
+  PARAM_DESCRIPTORS,
+  formatParamValue,
+  hasOverrides,
+  type GenerationParamKey,
+} from "./generationParams";
+import type {
+  EngineVersion,
+  GenerationParams,
+  HardwareProfile,
+  ModelInfo,
+  ProviderInfo,
+} from "./types";
 
 interface Props {
   providers: ProviderInfo[];
@@ -15,6 +27,10 @@ interface Props {
   onParentModelChange: (model: string) => void;
   serializeLocal: boolean;
   onSerializeLocalChange: (serialize: boolean) => void;
+  /** Sampling settings keyed by model name. Absent model, or absent key within
+   * one, means that knob is on the engine's default. */
+  modelParams: Record<string, GenerationParams>;
+  onModelParamsChange: (model: string, params: GenerationParams) => void;
   onClose: () => void;
   onChanged: () => void;
 }
@@ -50,6 +66,175 @@ function credentialStoreName(os?: string): string {
   }
 }
 
+/** Keeps a typed number inside the knob's usable range. Applied when editing
+ * finishes rather than per keystroke: clamping mid-type turns "1" on its way to
+ * "16384" into the minimum and eats the rest of the input. */
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/** The nine sampling knobs for one chosen local model.
+ *
+ * Split out from `Settings` because it owns editing state of its own (which
+ * model is being tuned, and the half-typed text in each box) that nothing else
+ * in the panel needs to know about. */
+function GenerationParamsSection({
+  models,
+  modelParams,
+  onModelParamsChange,
+}: Pick<Props, "models" | "modelParams" | "onModelParamsChange">) {
+  const [target, setTarget] = useState(() => models[0]?.name ?? "");
+  /** Text as typed, per knob, so an in-progress "-" or "0." isn't reparsed into
+   * something else under the cursor. Dropped once the field is left. */
+  const [drafts, setDrafts] = useState<Partial<Record<GenerationParamKey, string>>>({});
+
+  // A model can be uninstalled while this panel is open, and a picker pointing
+  // at something gone would silently write settings nothing will ever read.
+  useEffect(() => {
+    if (models.length === 0) {
+      setTarget("");
+    } else if (!models.some((m) => m.name === target)) {
+      setTarget(models[0].name);
+    }
+  }, [models, target]);
+
+  const params: GenerationParams = modelParams[target] ?? {};
+
+  function setValue(key: GenerationParamKey, value: number | null) {
+    const next = { ...params };
+    if (value == null) {
+      delete next[key];
+    } else {
+      next[key] = value;
+    }
+    onModelParamsChange(target, next);
+  }
+
+  function clearDraft(key: GenerationParamKey) {
+    setDrafts((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+
+  /** Applies what's in the box on the way out: blank means "back to the
+   * engine's default", anything unparseable is treated the same way. */
+  function finishEditing(key: GenerationParamKey, min: number, max: number) {
+    const raw = drafts[key];
+    clearDraft(key);
+    if (raw === undefined) return;
+    const parsed = Number(raw.trim());
+    if (raw.trim() === "" || !Number.isFinite(parsed)) {
+      setValue(key, null);
+    } else {
+      setValue(key, clamp(parsed, min, max));
+    }
+  }
+
+  if (models.length === 0) {
+    return (
+      <div className="settings-row">
+        <div className="settings-row-header">
+          <span className="settings-label">回答の生成パラメータ</span>
+        </div>
+        <p className="settings-note" style={{ margin: 0 }}>
+          ローカルモデルが1つも入っていないため、調整できる項目がありません。
+          モデルカタログからモデルを追加してください。
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-row">
+      <div className="settings-row-header">
+        <span className="settings-label">回答の生成パラメータ（モデルごと）</span>
+        {hasOverrides(modelParams[target]) && (
+          <button className="param-reset" onClick={() => onModelParamsChange(target, {})}>
+            このモデルを既定に戻す
+          </button>
+        )}
+      </div>
+      <p className="settings-note" style={{ margin: "0 0 8px" }}>
+        選んだローカルモデルの回答の作り方を調整します。空欄のままの項目はモデル本来の既定値で動きます。
+        オンラインの各サービスには適用されません（受け付ける項目が異なり、一部だけ効くと比較が正しく読めなくなるため）。
+      </p>
+      <select value={target} onChange={(e) => setTarget(e.target.value)}>
+        {models.map((m) => (
+          <option key={m.name} value={m.name}>
+            {m.name}
+            {hasOverrides(modelParams[m.name]) ? "（調整済み）" : ""}
+          </option>
+        ))}
+      </select>
+
+      {PARAM_DESCRIPTORS.map((d) => {
+        const current = params[d.key];
+        const overridden = current != null;
+        return (
+          <div key={d.key} className="param-row">
+            <div className="param-row-header">
+              <span className="param-label">
+                {d.label}
+                <span className="param-english">{d.englishLabel}</span>
+              </span>
+              <span className={`param-value ${overridden ? "set" : ""}`}>
+                {overridden
+                  ? formatParamValue(current, d.step)
+                  : `既定 ${formatParamValue(d.fallback, d.step)}`}
+              </span>
+            </div>
+            <div className="param-controls">
+              <input
+                type="range"
+                min={d.min}
+                max={d.max}
+                step={d.step}
+                value={current ?? d.fallback}
+                onChange={(e) => {
+                  clearDraft(d.key);
+                  setValue(d.key, Number(e.target.value));
+                }}
+              />
+              <input
+                className="param-number"
+                type="number"
+                min={d.min}
+                max={d.max}
+                step={d.step}
+                placeholder={formatParamValue(d.fallback, d.step)}
+                value={drafts[d.key] ?? (current != null ? String(current) : "")}
+                onChange={(e) => {
+                  const text = e.target.value;
+                  setDrafts((prev) => ({ ...prev, [d.key]: text }));
+                  const parsed = Number(text.trim());
+                  if (text.trim() !== "" && Number.isFinite(parsed)) {
+                    setValue(d.key, parsed);
+                  }
+                }}
+                onBlur={() => finishEditing(d.key, d.min, d.max)}
+              />
+              <button
+                className="param-reset"
+                onClick={() => {
+                  clearDraft(d.key);
+                  setValue(d.key, null);
+                }}
+                disabled={!overridden}
+                title="この項目を既定値に戻す"
+              >
+                既定
+              </button>
+            </div>
+            <p className="param-help">{d.help}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Settings({
   providers,
   models,
@@ -60,6 +245,8 @@ function Settings({
   onParentModelChange,
   serializeLocal,
   onSerializeLocalChange,
+  modelParams,
+  onModelParamsChange,
   onClose,
   onChanged,
 }: Props) {
@@ -157,6 +344,13 @@ function Settings({
             </button>
           </div>
         </div>
+
+        <GenerationParamsSection
+          models={models}
+          modelParams={modelParams}
+          onModelParamsChange={onModelParamsChange}
+        />
+
         <p className="settings-note">
           各サービス自身のAPIキーを入力してください。キーは{credentialStoreName(os)}に保存され、外部には送信されません。
         </p>

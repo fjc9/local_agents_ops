@@ -11,7 +11,9 @@ use crate::engines::anthropic::AnthropicBackend;
 use crate::engines::gemini::GeminiBackend;
 use crate::engines::ollama::{self, OllamaBackend};
 use crate::engines::openai_compat::OpenAiCompatBackend;
-use crate::engines::{ChatMessage, ChatOptions, ChatStreamEvent, InferenceBackend, ModelInfo};
+use crate::engines::{
+    ChatMessage, ChatOptions, ChatStreamEvent, GenerationParams, InferenceBackend, ModelInfo,
+};
 use crate::router::{self, RouterDecision};
 use crate::updater;
 
@@ -238,10 +240,12 @@ pub async fn send_chat(
     model: String,
     messages: Vec<ChatMessage>,
     think: Option<bool>,
+    params: Option<GenerationParams>,
 ) -> Result<(), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
     let options = ChatOptions {
         think: think.unwrap_or(false),
+        params: params.unwrap_or_default(),
     };
 
     let forward_app = app.clone();

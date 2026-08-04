@@ -88,6 +88,61 @@ pub enum ChatStreamEvent {
     },
 }
 
+/// Sampling knobs the user can set per model in the settings panel.
+///
+/// Field names deliberately match Ollama's `options` vocabulary, since this
+/// struct is serialised straight into its request body and the settings UI
+/// shows those same names alongside the Japanese labels -- a user reading
+/// Ollama's own docs should find the identical knob here.
+///
+/// Every field is `Option` and skipped when absent, so an untouched knob
+/// leaves the engine on its own default rather than having this app bake in a
+/// second, possibly stale, set of defaults.
+///
+/// The fractional knobs are `f64` to match the JSON numbers they arrive as:
+/// narrowing to `f32` would forward a temperature of 0.7 to the engine as
+/// 0.699999988, which is a value the user never chose.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GenerationParams {
+    /// Context window in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_ctx: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    /// How far back to look for repetition. `-1` means the whole context, `0`
+    /// disables the check -- hence signed, unlike the other counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_last_n: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+}
+
+impl GenerationParams {
+    /// True when the user has set nothing, so the caller can leave `options`
+    /// out of the payload entirely instead of sending an empty object.
+    pub fn is_empty(&self) -> bool {
+        self.num_ctx.is_none()
+            && self.temperature.is_none()
+            && self.top_k.is_none()
+            && self.top_p.is_none()
+            && self.min_p.is_none()
+            && self.repeat_last_n.is_none()
+            && self.repeat_penalty.is_none()
+            && self.presence_penalty.is_none()
+            && self.frequency_penalty.is_none()
+    }
+}
+
 /// Per-request knobs that apply across backends. Kept as a struct (rather
 /// than growing the `chat_stream` signature) so new options don't require
 /// touching every implementor.
@@ -99,6 +154,12 @@ pub struct ChatOptions {
     /// visible, so callers opt in when they want the deeper reasoning.
     #[serde(default)]
     pub think: bool,
+    /// Sampling settings for this model. Honoured by the local engine only:
+    /// the paid APIs each accept a different, smaller subset, and quietly
+    /// applying half a user's settings to some targets would make a
+    /// side-by-side comparison misleading about what was actually compared.
+    #[serde(default)]
+    pub params: GenerationParams,
 }
 
 /// Progress for a model download, forwarded to the frontend as a

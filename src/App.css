@@ -349,6 +349,95 @@ body,
   font-size: 0.82em;
 }
 
+/* One sampling knob. Indented and hairline-separated so nine of them read as a
+   list belonging to the row above rather than nine more settings rows. */
+.param-row {
+  padding: 8px 0 6px;
+  margin-left: 4px;
+  border-top: 1px solid rgba(127, 127, 127, 0.12);
+}
+
+.param-row:first-of-type {
+  border-top: none;
+  margin-top: 4px;
+}
+
+.param-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.param-label {
+  font-size: 0.88em;
+  font-weight: 600;
+}
+
+/* The engine's own term for the knob, so the Japanese label stays the headline
+   while upstream documentation is still findable from here. */
+.param-english {
+  font-weight: 400;
+  opacity: 0.45;
+  font-size: 0.85em;
+  margin-left: 6px;
+}
+
+.param-value {
+  font-size: 0.82em;
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.param-value.set {
+  color: #396cd8;
+  opacity: 1;
+  font-weight: 600;
+}
+
+.param-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 2px;
+}
+
+.param-controls input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #396cd8;
+}
+
+.param-number {
+  width: 5.5em;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  padding: 0.35em 0.5em;
+  font-family: inherit;
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+  background-color: #ffffff;
+  color: inherit;
+  outline: none;
+}
+
+.param-reset {
+  flex-shrink: 0;
+  padding: 0.35em 0.7em;
+  font-size: 0.75em;
+  box-shadow: none;
+  border-color: rgba(127, 127, 127, 0.35);
+}
+
+.param-help {
+  font-size: 0.78em;
+  opacity: 0.65;
+  margin: 0;
+  line-height: 1.45;
+}
+
 .composer {
   flex-shrink: 0;
   display: flex;
@@ -444,8 +533,13 @@ button,
     color: #f6f6f6;
   }
 
-  .settings-row-controls input {
+  .settings-row-controls input,
+  .param-number {
     color: #ffffff;
     background-color: #0f0f0f98;
+  }
+
+  .param-value.set {
+    color: #8fb0ff;
   }
 }
